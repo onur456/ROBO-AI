@@ -274,10 +274,6 @@ def probe_stance_hold(
     friction_geoms: list[int],
     torso_body_id: int,
 ) -> None:
-    print(
-        f"\nконтрольный замер стойки: 1 эпизод, {MAX_STEPS} шагов, "
-        f"friction={STANCE_CHECK_FRICTION}, Fy={STANCE_CHECK_FORCE}"
-    )
     result = run_controlled_episode(
         model,
         data,
@@ -287,16 +283,11 @@ def probe_stance_hold(
         STANCE_CHECK_FORCE,
         torso_body_id,
     )
-    z_start = result["z_start"]
-    z_end = result["z_end"]
-    dz = z_start - z_end
-    print(f"  z_start={z_start:.4f}, z_end={z_end:.4f}, Δz={dz:.4f}")
-    if result["fail_step"] is not None:
-        print(f"  стойка сама просела до падения на шаге {result['fail_step']}")
-    elif dz > 0.02:
-        print("  предупреждение: стойка заметно проседает без удара")
-    else:
-        print("  стойка удерживается без удара")
+    status = "упал" if result["fail_step"] is not None else "устоял"
+    print(
+        f"контроль стойки: z_start={result['z_start']:.4f} "
+        f"z_end={result['z_end']:.4f} {status}"
+    )
 
 
 def main() -> None:
@@ -320,8 +311,8 @@ def main() -> None:
             f"число актуаторов ({model.nu}) не совпадает с числом суставов ({len(target_qpos)})"
         )
 
-    probe_friction_effect(model, data, target_qpos, friction_geoms, torso_body_id)
     probe_stance_hold(model, data, target_qpos, friction_geoms, torso_body_id)
+    probe_friction_effect(model, data, target_qpos, friction_geoms, torso_body_id)
 
     rng = np.random.default_rng()
     failed_episodes: list[dict] = []
