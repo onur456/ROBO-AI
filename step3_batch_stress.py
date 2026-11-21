@@ -9,9 +9,11 @@ MODEL_PATH = r"C:\Users\HP\Desktop\mujoco_menagerie-main\mujoco_menagerie-main\u
 N_EPISODES = 40
 MAX_STEPS = 1500
 WINDOW_SIZE = 200
-FALL_HEIGHT = 0.22
-FRICTION_RANGE = (0.1, 1.0)
-HEIGHT_RANGE = (0.25, 0.42)
+FALL_HEIGHT = 0.20
+FRICTION_RANGE = (0.05, 1.0)
+LATERAL_VEL_RANGE = (-1.8, 1.8)
+KP = 25.0
+KD = 1.5
 REPORT_PATH = Path("reports") / "batch_failures.json"
 
 
@@ -24,6 +26,18 @@ def find_floor_geom_id(model: mujoco.MjModel) -> int:
         if int(model.geom_type[geom_id]) == int(mujoco.mjtGeom.mjGEOM_PLANE):
             return geom_id
     return 0
+
+
+def reset_to_stance(model: mujoco.MjModel, data: mujoco.MjData) -> None:
+    mujoco.mj_resetData(model, data)
+    if model.nkey > 0:
+        mujoco.mj_resetDataKeyframe(model, data, 0)
+
+
+def apply_pd(model: mujoco.MjModel, data: mujoco.MjData, target_qpos: np.ndarray) -> None:
+    if model.nu != len(target_qpos):
+        return
+    data.ctrl[:] = KP * (target_qpos - data.qpos[7:]) - KD * data.qvel[6:]
 
 
 def snapshot(step: int, data: mujoco.MjData, z: float) -> dict:
@@ -62,21 +76,28 @@ def main() -> None:
     model = mujoco.MjModel.from_xml_path(MODEL_PATH)
     data = mujoco.MjData(model)
     floor_id = find_floor_geom_id(model)
-    rng = np.random.default_rng()
 
+    reset_to_stance(model, data)
+    target_qpos = np.array(data.qpos[7:], copy=True)
+    if model.nu != len(target_qpos):
+        raise RuntimeError(
+            f"число актуаторов ({model.nu}) не совпадает с числом суставов ({len(target_qpos)})"
+        )
+
+    rng = np.random.default_rng()
     failed_episodes: list[dict] = []
     failed_friction: list[float] = []
-    failed_height: list[float] = []
+    failed_lateral: list[float] = []
     survived_friction: list[float] = []
-    survived_height: list[float] = []
+    survived_lateral: list[float] = []
 
     for episode in range(1, N_EPISODES + 1):
-        mujoco.mj_resetData(model, data)
+        reset_to_stance(model, data)
 
         friction = float(rng.uniform(*FRICTION_RANGE))
-        initial_height = float(rng.uniform(*HEIGHT_RANGE))
+        lateral_vel = float(rng.uniform(*LATERAL_VEL_RANGE))
         model.geom_friction[floor_id, 0] = friction
-        data.qpos[2] = initial_height
+        data.qvel[1] = lateral_vel
         mujoco.mj_forward(model, data)
 
         window: deque[dict] = deque(maxlen=WINDOW_SIZE)
@@ -84,11 +105,12 @@ def main() -> None:
         params = {
             "episode": episode,
             "friction": friction,
-            "initial_height": initial_height,
+            "lateral_vel": lateral_vel,
             "floor_geom_id": int(floor_id),
         }
 
         for step in range(1, MAX_STEPS + 1):
+            apply_pd(model, data, target_qpos)
             mujoco.mj_step(model, data)
             z = float(data.qpos[2])
             window.append(snapshot(step, data, z))
@@ -104,41 +126,47 @@ def main() -> None:
                     }
                 )
                 failed_friction.append(friction)
-                failed_height.append(initial_height)
+                failed_lateral.append(lateral_vel)
                 episode_failed = True
                 break
 
         if not episode_failed:
             survived_friction.append(friction)
-            survived_height.append(initial_height)
+            survived_lateral.append(lateral_vel)
 
     n_failures = len(failed_episodes)
+    n_survived = N_EPISODES - n_failures
     failure_rate = n_failures / N_EPISODES
     failed_friction_stats = value_stats(failed_friction)
-    failed_height_stats = value_stats(failed_height)
+    failed_lateral_stats = value_stats(failed_lateral)
     survived_friction_stats = value_stats(survived_friction)
-    survived_height_stats = value_stats(survived_height)
+    survived_lateral_stats = value_stats(survived_lateral)
 
     print(f"всего прогонов: {N_EPISODES}")
-    print(f"сбоев: {n_failures}")
+    print(f"упало: {n_failures}")
+    print(f"устояло: {n_survived}")
     print(f"процент сбоев: {failure_rate * 100:.1f}%")
     print(f"упавшие, трение: {format_stats(failed_friction_stats)}")
-    print(f"упавшие, начальная высота: {format_stats(failed_height_stats)}")
-    print(f"неупавшие, трение: {format_stats(survived_friction_stats)}")
-    print(f"неупавшие, начальная высота: {format_stats(survived_height_stats)}")
+    print(f"упавшие, боковая скорость: {format_stats(failed_lateral_stats)}")
+    print(f"устоявшие, трение: {format_stats(survived_friction_stats)}")
+    print(f"устоявшие, боковая скорость: {format_stats(survived_lateral_stats)}")
 
     report = {
         "n_episodes": N_EPISODES,
         "n_failures": n_failures,
+        "n_survived": n_survived,
         "failure_rate": failure_rate,
+        "kp": KP,
+        "kd": KD,
         "floor_geom_id": int(floor_id),
+        "target_qpos": target_qpos.tolist(),
         "failed": {
             "friction": failed_friction_stats,
-            "initial_height": failed_height_stats,
+            "lateral_vel": failed_lateral_stats,
         },
         "survived": {
             "friction": survived_friction_stats,
-            "initial_height": survived_height_stats,
+            "lateral_vel": survived_lateral_stats,
         },
         "failures": failed_episodes,
     }
