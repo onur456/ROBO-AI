@@ -25,6 +25,8 @@ KD = 1.5
 # Старое left -= u / right += u давало сумму поправок ≈ 0.
 K_ROLL_P = 5.0
 K_ROLL_D = 3.0
+K_ROLL_P_INV = 2.0
+K_ROLL_D_INV = 1.0
 K_ROLL_THIGH = 0.0
 LEFT_HIP_IDX = (0, 6)
 RIGHT_HIP_IDX = (3, 9)
@@ -38,7 +40,24 @@ DEBUG_DELTA_END = 550
 PD_VARIANTS = (
     {"name": "baseline", "kp": 25.0, "kd": 1.5, "roll_damped": False},
     {"name": "stiff", "kp": 40.0, "kd": 3.0, "roll_damped": False},
-    {"name": "roll_damped", "kp": 25.0, "kd": 1.5, "roll_damped": True},
+    {
+        "name": "roll_damped",
+        "kp": 25.0,
+        "kd": 1.5,
+        "roll_damped": True,
+        "roll_sign": 1.0,
+        "k_roll_p": K_ROLL_P,
+        "k_roll_d": K_ROLL_D,
+    },
+    {
+        "name": "roll_damped_inv",
+        "kp": 25.0,
+        "kd": 1.5,
+        "roll_damped": True,
+        "roll_sign": -1.0,
+        "k_roll_p": K_ROLL_P_INV,
+        "k_roll_d": K_ROLL_D_INV,
+    },
 )
 REPORT_PATH = Path("reports") / "batch_failures.json"
 
@@ -189,6 +208,9 @@ def apply_pd(
     kp: float = KP,
     kd: float = KD,
     roll_damped: bool = False,
+    roll_sign: float = 1.0,
+    k_roll_p: float | None = None,
+    k_roll_d: float | None = None,
 ) -> None:
     if model.nu != len(target_qpos):
         return
@@ -197,9 +219,11 @@ def apply_pd(
         return
     roll = body_roll(data.qpos)
     roll_rate = float(data.qvel[3])
-    # +u на всех четырёх abduction: +ctrl → −qacc_roll, поэтому
-    # u имеет знак roll / qvel[3] и гасит крен, а не обнуляется.
-    u = K_ROLL_P * roll + K_ROLL_D * roll_rate
+    # roll_sign=+1: +u на всех abduction → −τ_roll на torso (гашение).
+    # roll_sign=-1: противоположный знак (roll_damped_inv).
+    kp_r = K_ROLL_P if k_roll_p is None else k_roll_p
+    kd_r = K_ROLL_D if k_roll_d is None else k_roll_d
+    u = roll_sign * (kp_r * roll + kd_r * roll_rate)
     for idx in (*LEFT_HIP_IDX, *RIGHT_HIP_IDX):
         data.ctrl[idx] += u
     if K_ROLL_THIGH:
@@ -374,6 +398,9 @@ def run_controlled_episode(
     kp: float = KP,
     kd: float = KD,
     roll_damped: bool = False,
+    roll_sign: float = 1.0,
+    k_roll_p: float | None = None,
+    k_roll_d: float | None = None,
 ) -> dict:
     reset_to_stance(model, data)
     set_sliding_friction(model, friction_geoms, friction)
@@ -388,7 +415,17 @@ def run_controlled_episode(
     ys: list[float] = []
     fail_step = None
     for step in range(1, MAX_STEPS + 1):
-        apply_pd(model, data, target_qpos, kp=kp, kd=kd, roll_damped=roll_damped)
+        apply_pd(
+            model,
+            data,
+            target_qpos,
+            kp=kp,
+            kd=kd,
+            roll_damped=roll_damped,
+            roll_sign=roll_sign,
+            k_roll_p=k_roll_p,
+            k_roll_d=k_roll_d,
+        )
         apply_torso_impulse(data, torso_body_id, step, lateral_force)
         mujoco.mj_step(model, data)
         z = float(data.qpos[2])
@@ -475,6 +512,10 @@ def probe_stance_hold(
     kp: float = KP,
     kd: float = KD,
     roll_damped: bool = False,
+    roll_sign: float = 1.0,
+    k_roll_p: float | None = None,
+    k_roll_d: float | None = None,
+    label: str = "",
 ) -> dict:
     result = run_controlled_episode(
         model,
@@ -487,9 +528,12 @@ def probe_stance_hold(
         kp=kp,
         kd=kd,
         roll_damped=roll_damped,
+        roll_sign=roll_sign,
+        k_roll_p=k_roll_p,
+        k_roll_d=k_roll_d,
     )
     status = "упал" if result["fail_step"] is not None else "устоял"
-    mode = " roll_damped" if roll_damped else ""
+    mode = f" {label}" if label else (" roll_damped" if roll_damped else "")
     print(
         f"контроль стойки kp={kp:g} kd={kd:g}{mode}: z_start={result['z_start']:.4f} "
         f"z_end={result['z_end']:.4f} {status}"
@@ -509,6 +553,9 @@ def run_stress_batch(
     kd: float,
     keep_windows: bool,
     roll_damped: bool = False,
+    roll_sign: float = 1.0,
+    k_roll_p: float | None = None,
+    k_roll_d: float | None = None,
 ) -> dict:
     failed_episodes: list[dict] = []
     failed_friction: list[float] = []
@@ -534,10 +581,23 @@ def run_stress_batch(
             "kp": kp,
             "kd": kd,
             "roll_damped": roll_damped,
+            "roll_sign": roll_sign,
+            "k_roll_p": k_roll_p,
+            "k_roll_d": k_roll_d,
         }
 
         for step in range(1, MAX_STEPS + 1):
-            apply_pd(model, data, target_qpos, kp=kp, kd=kd, roll_damped=roll_damped)
+            apply_pd(
+                model,
+                data,
+                target_qpos,
+                kp=kp,
+                kd=kd,
+                roll_damped=roll_damped,
+                roll_sign=roll_sign,
+                k_roll_p=k_roll_p,
+                k_roll_d=k_roll_d,
+            )
             apply_torso_impulse(data, torso_body_id, step, lateral_force)
             mujoco.mj_step(model, data)
             z = float(data.qpos[2])
@@ -629,6 +689,9 @@ def main() -> None:
         kp = variant["kp"]
         kd = variant["kd"]
         roll_damped = bool(variant["roll_damped"])
+        roll_sign = float(variant.get("roll_sign", 1.0))
+        k_roll_p = variant.get("k_roll_p")
+        k_roll_d = variant.get("k_roll_d")
         stance = probe_stance_hold(
             model,
             data,
@@ -638,6 +701,10 @@ def main() -> None:
             kp=kp,
             kd=kd,
             roll_damped=roll_damped,
+            roll_sign=roll_sign,
+            k_roll_p=k_roll_p,
+            k_roll_d=k_roll_d,
+            label=name if roll_damped else "",
         )
         keep_windows = name == PD_VARIANTS[0]["name"]
         batch = run_stress_batch(
@@ -652,9 +719,17 @@ def main() -> None:
             kd,
             keep_windows=keep_windows,
             roll_damped=roll_damped,
+            roll_sign=roll_sign,
+            k_roll_p=k_roll_p,
+            k_roll_d=k_roll_d,
         )
+        extra = ""
+        if roll_damped:
+            kp_r = K_ROLL_P if k_roll_p is None else k_roll_p
+            kd_r = K_ROLL_D if k_roll_d is None else k_roll_d
+            extra = f"  sign={roll_sign:+g} Kp_roll={kp_r:g} Kd_roll={kd_r:g}"
         print(
-            f"  {name}: kp={kp:g} kd={kd:g}  "
+            f"  {name}: kp={kp:g} kd={kd:g}{extra}  "
             f"z_end={stance['z_end']:.4f}  "
             f"сбои={batch['failure_rate'] * 100:.1f}% "
             f"({batch['n_failures']}/{batch['n_episodes']})  "
