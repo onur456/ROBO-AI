@@ -16,6 +16,8 @@ IMPULSE_START = 450
 IMPULSE_END = 500
 PROBE_FRICTIONS = (0.05, 1.0)
 PROBE_LATERAL_FORCE = 180.0
+STANCE_CHECK_FRICTION = 0.8
+STANCE_CHECK_FORCE = 0.0
 KP = 25.0
 KD = 1.5
 REPORT_PATH = Path("reports") / "batch_failures.json"
@@ -177,6 +179,7 @@ def run_controlled_episode(
     reset_to_stance(model, data)
     set_sliding_friction(model, friction_geoms, friction)
     mujoco.mj_forward(model, data)
+    z_start = float(data.qpos[2])
 
     contact_friction = None
     if data.ncon > 0:
@@ -200,6 +203,7 @@ def run_controlled_episode(
         geom_id: float(model.geom_friction[geom_id, 0]) for geom_id in friction_geoms
     }
     return {
+        "z_start": z_start,
         "friction": friction,
         "lateral_force": lateral_force,
         "written_sliding": written,
@@ -263,6 +267,38 @@ def probe_friction_effect(
         print("  траектории различаются, трение влияет на устойчивость")
 
 
+def probe_stance_hold(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+) -> None:
+    print(
+        f"\nконтрольный замер стойки: 1 эпизод, {MAX_STEPS} шагов, "
+        f"friction={STANCE_CHECK_FRICTION}, Fy={STANCE_CHECK_FORCE}"
+    )
+    result = run_controlled_episode(
+        model,
+        data,
+        target_qpos,
+        friction_geoms,
+        STANCE_CHECK_FRICTION,
+        STANCE_CHECK_FORCE,
+        torso_body_id,
+    )
+    z_start = result["z_start"]
+    z_end = result["z_end"]
+    dz = z_start - z_end
+    print(f"  z_start={z_start:.4f}, z_end={z_end:.4f}, Δz={dz:.4f}")
+    if result["fail_step"] is not None:
+        print(f"  стойка сама просела до падения на шаге {result['fail_step']}")
+    elif dz > 0.02:
+        print("  предупреждение: стойка заметно проседает без удара")
+    else:
+        print("  стойка удерживается без удара")
+
+
 def main() -> None:
     model = mujoco.MjModel.from_xml_path(MODEL_PATH)
     data = mujoco.MjData(model)
@@ -285,6 +321,7 @@ def main() -> None:
         )
 
     probe_friction_effect(model, data, target_qpos, friction_geoms, torso_body_id)
+    probe_stance_hold(model, data, target_qpos, friction_geoms, torso_body_id)
 
     rng = np.random.default_rng()
     failed_episodes: list[dict] = []
