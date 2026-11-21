@@ -67,6 +67,14 @@ def apply_torso_impulse(
         data.xfrc_applied[torso_body_id, 1] = force
 
 
+def impact_phase(fail_step: int) -> str:
+    if fail_step < IMPULSE_START:
+        return "before_impact"
+    if fail_step <= IMPULSE_END:
+        return "during_impact"
+    return "after_impact"
+
+
 def find_foot_geom_ids(model: mujoco.MjModel) -> list[int]:
     ids: list[int] = []
     for name in ("FL", "FR", "RL", "RR"):
@@ -319,6 +327,7 @@ def main() -> None:
                         "fail_step": step,
                         "fail_time": float(data.time),
                         "final_z": z,
+                        "impact_phase": impact_phase(step),
                         "window": list(window),
                     }
                 )

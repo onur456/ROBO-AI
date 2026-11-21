@@ -18,6 +18,15 @@ CAT_OVERTURN = "Опрокидывание от бокового импульс�
 CAT_SLIP = "Разъезжание лап на скользкой поверхности"
 CAT_OTHER = "Прочее / смешанный сбой"
 
+PHASE_BEFORE = "before_impact"
+PHASE_DURING = "during_impact"
+PHASE_AFTER = "after_impact"
+PHASE_LABELS = {
+    PHASE_BEFORE: "до удара (ещё до включения Fy)",
+    PHASE_DURING: "во время удара (шаги 450..500)",
+    PHASE_AFTER: "после удара",
+}
+
 
 def get_api_key() -> str | None:
     return os.environ.get("GEMINI_API_KEY") or None
@@ -82,6 +91,16 @@ def impulse_bounds(ep: dict, payload: dict | None = None) -> tuple[int, int]:
     return start, end
 
 
+def impact_phase_of(fail_step: int, start: int, end: int, stored: object = None) -> str:
+    if stored in {PHASE_BEFORE, PHASE_DURING, PHASE_AFTER}:
+        return str(stored)
+    if fail_step < start:
+        return PHASE_BEFORE
+    if fail_step <= end:
+        return PHASE_DURING
+    return PHASE_AFTER
+
+
 def fail_vs_impulse(fail_step: int, start: int, end: int) -> str:
     if fail_step < start:
         return f"до удара ({start - fail_step} шагов до начала {start}..{end})"
@@ -114,6 +133,9 @@ def classify_episodes(payload: dict) -> list[dict]:
         uses_force = episode_uses_force(ep)
         fail_step = _as_int(ep.get("fail_step"))
         impulse_start, impulse_end = impulse_bounds(ep, payload)
+        phase = impact_phase_of(
+            fail_step, impulse_start, impulse_end, ep.get("impact_phase")
+        )
         category = classify_failure(friction, metrics["max_abs_roll_rate"])
         classified.append(
             {
@@ -126,6 +148,7 @@ def classify_episodes(payload: dict) -> list[dict]:
                 "final_z": _as_float(ep.get("final_z")),
                 "impulse_start": impulse_start,
                 "impulse_end": impulse_end,
+                "impact_phase": phase,
                 "fail_vs_impulse": fail_vs_impulse(fail_step, impulse_start, impulse_end),
                 "category": category,
                 **metrics,
@@ -142,6 +165,17 @@ def category_stats(episodes: list[dict]) -> list[tuple[str, int, float]]:
         n = counts.get(name, 0)
         pct = (100.0 * n / total) if total else 0.0
         rows.append((name, n, pct))
+    return rows
+
+
+def phase_stats(episodes: list[dict]) -> list[tuple[str, str, int, float]]:
+    counts = Counter(ep.get("impact_phase") for ep in episodes)
+    total = len(episodes)
+    rows = []
+    for phase, label in PHASE_LABELS.items():
+        n = counts.get(phase, 0)
+        pct = (100.0 * n / total) if total else 0.0
+        rows.append((phase, label, n, pct))
     return rows
 
 
@@ -254,6 +288,7 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
     n_survived = payload.get("n_survived")
     rate = payload.get("failure_rate")
     stats = category_stats(episodes)
+    phases = phase_stats(episodes)
     examples = pick_examples(episodes)
     recs = controller_recommendations(stats)
 
@@ -283,6 +318,12 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
 
     for name, n, pct in stats:
         lines.append(f"- **{name}**: {n} шт. ({pct:.1f}% от сбоев)")
+    lines += ["", "## Разбивка сбоев по фазам удара", ""]
+    for phase, label, n, pct in phases:
+        extra = ""
+        if phase == PHASE_BEFORE and n:
+            extra = " — падение ещё до включения силы Fy"
+        lines.append(f"- **{label}** (`{phase}`): {n} шт. ({pct:.1f}% от сбоев){extra}")
     lines += ["", "## Показательные примеры", ""]
 
     if not examples:
