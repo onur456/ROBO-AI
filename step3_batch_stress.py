@@ -374,6 +374,12 @@ def run_stress_batch(
 
     n_episodes = len(specs)
     n_failures = len(failed_episodes)
+    n_before = sum(
+        1
+        for ep in failed_episodes
+        if ep.get("impact_phase") == "before_impact" or int(ep["fail_step"]) < IMPULSE_START
+    )
+    n_at_or_after = n_failures - n_before
     return {
         "kp": kp,
         "kd": kd,
@@ -381,6 +387,8 @@ def run_stress_batch(
         "n_failures": n_failures,
         "n_survived": n_episodes - n_failures,
         "failure_rate": n_failures / n_episodes if n_episodes else 0.0,
+        "n_before_impact": n_before,
+        "n_at_or_after_impact": n_at_or_after,
         "failed_episodes": failed_episodes,
         "failed_friction": failed_friction,
         "failed_force": failed_force,
@@ -441,7 +449,9 @@ def main() -> None:
             f"  {name}: kp={kp:g} kd={kd:g}  "
             f"z_end={stance['z_end']:.4f}  "
             f"сбои={batch['failure_rate'] * 100:.1f}% "
-            f"({batch['n_failures']}/{batch['n_episodes']})"
+            f"({batch['n_failures']}/{batch['n_episodes']})  "
+            f"до шага {IMPULSE_START}: {batch['n_before_impact']}  "
+            f"при/после {IMPULSE_START}: {batch['n_at_or_after_impact']}"
         )
         if keep_windows:
             main_batch = batch
