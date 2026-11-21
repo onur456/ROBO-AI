@@ -1,3 +1,4 @@
+import argparse
 import json
 from collections import deque
 from pathlib import Path
@@ -18,47 +19,13 @@ PROBE_FRICTIONS = (0.05, 1.0)
 PROBE_LATERAL_FORCE = 180.0
 STANCE_CHECK_FRICTION = 0.8
 STANCE_CHECK_FORCE = 0.0
-KP = 25.0
-KD = 1.5
-# Оси всех hip abduction совпадают с +X корпуса: +ctrl на любом бедре
-# даёт −τ_roll на torso. Одинаковый знак на левой и правой стороне.
-# Старое left -= u / right += u давало сумму поправок ≈ 0.
-K_ROLL_P = 5.0
-K_ROLL_D = 3.0
-K_ROLL_P_INV = 2.0
-K_ROLL_D_INV = 1.0
-K_ROLL_THIGH = 0.0
-LEFT_HIP_IDX = (0, 6)
-RIGHT_HIP_IDX = (3, 9)
-LEFT_THIGH_IDX = (1, 7)
-RIGHT_THIGH_IDX = (4, 10)
-HIP_ACTUATOR_NAMES = ("FL_hip", "FR_hip", "RL_hip", "RR_hip")
-DEBUG_DELTA_FRICTION = 0.8
-DEBUG_DELTA_FORCE = 250.0
-DEBUG_DELTA_START = 450
-DEBUG_DELTA_END = 550
-PD_VARIANTS = (
-    {"name": "baseline", "kp": 25.0, "kd": 1.5, "roll_damped": False},
-    {"name": "stiff", "kp": 40.0, "kd": 3.0, "roll_damped": False},
-    {
-        "name": "roll_damped",
-        "kp": 25.0,
-        "kd": 1.5,
-        "roll_damped": True,
-        "roll_sign": 1.0,
-        "k_roll_p": K_ROLL_P,
-        "k_roll_d": K_ROLL_D,
-    },
-    {
-        "name": "roll_damped_inv",
-        "kp": 25.0,
-        "kd": 1.5,
-        "roll_damped": True,
-        "roll_sign": -1.0,
-        "k_roll_p": K_ROLL_P_INV,
-        "k_roll_d": K_ROLL_D_INV,
-    },
-)
+PD_MODES = {
+    "baseline": {"kp": 25.0, "kd": 1.5},
+    "stiff": {"kp": 40.0, "kd": 3.0},
+}
+MAIN_MODE = "baseline"
+KP = PD_MODES[MAIN_MODE]["kp"]
+KD = PD_MODES[MAIN_MODE]["kd"]
 REPORT_PATH = Path("reports") / "batch_failures.json"
 
 GEOM_TYPE_NAMES = {
@@ -71,6 +38,17 @@ GEOM_TYPE_NAMES = {
     int(mujoco.mjtGeom.mjGEOM_BOX): "box",
     int(mujoco.mjtGeom.mjGEOM_MESH): "mesh",
 }
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Batch stress for Go2 PD stance")
+    parser.add_argument(
+        "--mode",
+        choices=tuple(PD_MODES),
+        default=MAIN_MODE,
+        help="режим основного прогона и JSON (сравнение всегда baseline vs stiff)",
+    )
+    return parser.parse_args()
 
 
 def geom_name(model: mujoco.MjModel, geom_id: int) -> str:
@@ -168,197 +146,16 @@ def reset_to_stance(model: mujoco.MjModel, data: mujoco.MjData) -> None:
         mujoco.mj_resetDataKeyframe(model, data, 0)
 
 
-def body_roll(qpos) -> float:
-    w, x, y, z = (float(qpos[3]), float(qpos[4]), float(qpos[5]), float(qpos[6]))
-    sinr_cosp = 2.0 * (w * x + y * z)
-    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
-    return float(np.arctan2(sinr_cosp, cosr_cosp))
-
-
-def actuator_index(model: mujoco.MjModel, name: str) -> int:
-    act_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
-    if act_id < 0:
-        raise RuntimeError(f"нет актуатора {name!r}")
-    return int(act_id)
-
-
-def resolve_hip_actuators(model: mujoco.MjModel) -> tuple[tuple[int, int], tuple[int, int]]:
-    left = (
-        actuator_index(model, "FL_hip"),
-        actuator_index(model, "RL_hip"),
-    )
-    right = (
-        actuator_index(model, "FR_hip"),
-        actuator_index(model, "RR_hip"),
-    )
-    return left, right
-
-
-def hip_world_axis(model: mujoco.MjModel, data: mujoco.MjData, act_id: int) -> np.ndarray:
-    joint_id = int(model.actuator_trnid[act_id, 0])
-    body_id = int(model.jnt_bodyid[joint_id])
-    axis_world = data.xmat[body_id].reshape(3, 3) @ model.jnt_axis[joint_id]
-    return np.asarray(axis_world, dtype=float)
-
-
 def apply_pd(
     model: mujoco.MjModel,
     data: mujoco.MjData,
     target_qpos: np.ndarray,
     kp: float = KP,
     kd: float = KD,
-    roll_damped: bool = False,
-    roll_sign: float = 1.0,
-    k_roll_p: float | None = None,
-    k_roll_d: float | None = None,
-) -> tuple[float, float]:
-    if model.nu != len(target_qpos):
-        return 0.0, 0.0
-    data.ctrl[:] = kp * (target_qpos - data.qpos[7:]) - kd * data.qvel[6:]
-    if not roll_damped:
-        return 0.0, 0.0
-    ctrl_pd = np.array(data.ctrl, copy=True)
-    roll = body_roll(data.qpos)
-    roll_rate = float(data.qvel[3])
-    # roll_sign=+1: +u на всех abduction → −τ_roll на torso (гашение).
-    # roll_sign=-1: противоположный знак (roll_damped_inv).
-    kp_r = K_ROLL_P if k_roll_p is None else k_roll_p
-    kd_r = K_ROLL_D if k_roll_d is None else k_roll_d
-    u = roll_sign * (kp_r * roll + kd_r * roll_rate)
-    for idx in (*LEFT_HIP_IDX, *RIGHT_HIP_IDX):
-        data.ctrl[idx] += u
-    if K_ROLL_THIGH:
-        u_thigh = K_ROLL_THIGH * u
-        for idx in LEFT_THIGH_IDX:
-            data.ctrl[idx] -= u_thigh
-        for idx in RIGHT_THIGH_IDX:
-            data.ctrl[idx] += u_thigh
-    np.clip(
-        data.ctrl,
-        model.actuator_ctrlrange[:, 0],
-        model.actuator_ctrlrange[:, 1],
-        out=data.ctrl,
-    )
-    delta = np.asarray(data.ctrl) - ctrl_pd
-    hip_ids = (*LEFT_HIP_IDX, *RIGHT_HIP_IDX)
-    mean_abs = float(np.mean(np.abs(delta)))
-    mean_abs_hip = float(np.mean(np.abs(delta[list(hip_ids)])))
-    return mean_abs, mean_abs_hip
-
-
-def debug_roll_ctrl_delta(
-    model: mujoco.MjModel,
-    data: mujoco.MjData,
-    target_qpos: np.ndarray,
-    friction_geoms: list[int],
-    torso_body_id: int,
 ) -> None:
-    print("\nотладка roll_damped: актуаторы abduction / знак qvel[3] / Δctrl 450..550")
-    reset_to_stance(model, data)
-    mujoco.mj_forward(model, data)
-    hip_ids = [actuator_index(model, name) for name in HIP_ACTUATOR_NAMES]
-    for name, act_id in zip(HIP_ACTUATOR_NAMES, hip_ids):
-        side = "left" if act_id in LEFT_HIP_IDX else "right"
-        axis = hip_world_axis(model, data, act_id)
-        print(
-            f"  {act_id} {name}  {side}  axis_world={np.round(axis, 4).tolist()}  "
-            f"ctrlrange={model.actuator_ctrlrange[act_id].tolist()}"
-        )
-    print(
-        f"  LEFT_HIP_IDX={LEFT_HIP_IDX} RIGHT_HIP_IDX={RIGHT_HIP_IDX}  "
-        f"K_ROLL_P={K_ROLL_P:g} K_ROLL_D={K_ROLL_D:g}"
-    )
-    print("  все оси +X: left и right должны получать ОДИНАКОВЫЙ знак поправки к qvel[3]")
-
-    set_sliding_friction(model, friction_geoms, DEBUG_DELTA_FRICTION)
-    reset_to_stance(model, data)
-    mujoco.mj_forward(model, data)
-
-    max_abs = -1.0
-    max_info: dict | None = None
-    n_window = 0
-    abs_samples: list[float] = []
-
-    for step in range(1, MAX_STEPS + 1):
-        apply_pd(model, data, target_qpos, kp=KP, kd=KD, roll_damped=False)
-        ctrl_base = np.array(data.ctrl, copy=True)
-        apply_pd(model, data, target_qpos, kp=KP, kd=KD, roll_damped=True)
-        ctrl_rd = np.array(data.ctrl, copy=True)
-        delta = ctrl_rd - ctrl_base
-        roll = body_roll(data.qpos)
-        rate = float(data.qvel[3])
-
-        apply_torso_impulse(data, torso_body_id, step, DEBUG_DELTA_FORCE)
-        mujoco.mj_step(model, data)
-
-        if DEBUG_DELTA_START <= step <= DEBUG_DELTA_END:
-            n_window += 1
-            hip_delta = delta[hip_ids]
-            abs_max_step = float(np.max(np.abs(hip_delta)))
-            abs_samples.append(abs_max_step)
-            if abs_max_step > max_abs:
-                max_abs = abs_max_step
-                named = {
-                    name: float(delta[act_id])
-                    for name, act_id in zip(HIP_ACTUATOR_NAMES, hip_ids)
-                }
-                left_mean = float(np.mean([delta[i] for i in LEFT_HIP_IDX]))
-                right_mean = float(np.mean([delta[i] for i in RIGHT_HIP_IDX]))
-                hip_sum = float(np.sum(hip_delta))
-                max_info = {
-                    "step": step,
-                    "roll": roll,
-                    "qvel3": rate,
-                    "named": named,
-                    "left_mean": left_mean,
-                    "right_mean": right_mean,
-                    "hip_sum": hip_sum,
-                    "same_sign": (
-                        abs(left_mean) < 1e-12
-                        or abs(right_mean) < 1e-12
-                        or left_mean * right_mean > 0.0
-                    ),
-                    "damps": hip_sum * rate > 0.0 if abs(rate) > 1e-9 else None,
-                }
-
-        if float(data.qpos[2]) < FALL_HEIGHT:
-            print(f"  эпизод отладки упал на шаге {step}, окно обрезано")
-            break
-
-    print(
-        f"  μ={DEBUG_DELTA_FRICTION:g} Fy={DEBUG_DELTA_FORCE:g} Н, "
-        f"шаги {DEBUG_DELTA_START}..{DEBUG_DELTA_END} (n={n_window})"
-    )
-    if max_info is None:
-        print("  нет шагов в окне 450..550")
+    if model.nu != len(target_qpos):
         return
-    print(
-        f"  max |Δctrl| hip={max_abs:.4f} Н·м  "
-        f"(mean по окну {float(np.mean(abs_samples)):.4f})"
-    )
-    named_s = ", ".join(f"{k}={v:+.4f}" for k, v in max_info["named"].items())
-    print(
-        f"  на шаге {max_info['step']}: roll={max_info['roll']:+.4f}  "
-        f"qvel[3]={max_info['qvel3']:+.4f}  Δctrl {named_s}"
-    )
-    print(
-        f"  mean Δ left={max_info['left_mean']:+.4f}  "
-        f"mean Δ right={max_info['right_mean']:+.4f}  "
-        f"sum Δ hips={max_info['hip_sum']:+.4f}  "
-        f"left/right один знак={max_info['same_sign']}"
-    )
-    print(
-        f"  для сравнения: старое left-=u / right+=u давало sum Δ hips=0 "
-        f"(дифференциал, не момент крена); сейчас sum={max_info['hip_sum']:+.4f}"
-    )
-    if max_abs < 1e-6:
-        print("  предупреждение: поправка ≈ 0, до моторов не доходит")
-    elif not max_info["same_sign"]:
-        print("  предупреждение: левая и правая поправки противоположны, момент крена гасится")
-    elif max_info["damps"] is False:
-        print("  предупреждение: sum(Δhips) и qvel[3] разных знаков — поправка раскачивает крен")
-    else:
-        print("  поправка доходит до моторов, знак left=right, sum(Δ) совпадает с qvel[3] (гашение)")
+    data.ctrl[:] = kp * (target_qpos - data.qpos[7:]) - kd * data.qvel[6:]
 
 
 def snapshot(step: int, data: mujoco.MjData, z: float) -> dict:
@@ -403,10 +200,6 @@ def run_controlled_episode(
     torso_body_id: int,
     kp: float = KP,
     kd: float = KD,
-    roll_damped: bool = False,
-    roll_sign: float = 1.0,
-    k_roll_p: float | None = None,
-    k_roll_d: float | None = None,
 ) -> dict:
     reset_to_stance(model, data)
     set_sliding_friction(model, friction_geoms, friction)
@@ -421,17 +214,7 @@ def run_controlled_episode(
     ys: list[float] = []
     fail_step = None
     for step in range(1, MAX_STEPS + 1):
-        apply_pd(
-            model,
-            data,
-            target_qpos,
-            kp=kp,
-            kd=kd,
-            roll_damped=roll_damped,
-            roll_sign=roll_sign,
-            k_roll_p=k_roll_p,
-            k_roll_d=k_roll_d,
-        )
+        apply_pd(model, data, target_qpos, kp=kp, kd=kd)
         apply_torso_impulse(data, torso_body_id, step, lateral_force)
         mujoco.mj_step(model, data)
         z = float(data.qpos[2])
@@ -467,6 +250,8 @@ def probe_friction_effect(
     target_qpos: np.ndarray,
     friction_geoms: list[int],
     torso_body_id: int,
+    kp: float,
+    kd: float,
 ) -> None:
     print(
         f"\nпроверка трения: Fy={PROBE_LATERAL_FORCE:.1f} Н на шагах "
@@ -481,6 +266,8 @@ def probe_friction_effect(
             mu,
             PROBE_LATERAL_FORCE,
             torso_body_id,
+            kp=kp,
+            kd=kd,
         )
         for mu in PROBE_FRICTIONS
     ]
@@ -515,13 +302,8 @@ def probe_stance_hold(
     target_qpos: np.ndarray,
     friction_geoms: list[int],
     torso_body_id: int,
-    kp: float = KP,
-    kd: float = KD,
-    roll_damped: bool = False,
-    roll_sign: float = 1.0,
-    k_roll_p: float | None = None,
-    k_roll_d: float | None = None,
-    label: str = "",
+    kp: float,
+    kd: float,
 ) -> dict:
     result = run_controlled_episode(
         model,
@@ -533,15 +315,10 @@ def probe_stance_hold(
         torso_body_id,
         kp=kp,
         kd=kd,
-        roll_damped=roll_damped,
-        roll_sign=roll_sign,
-        k_roll_p=k_roll_p,
-        k_roll_d=k_roll_d,
     )
     status = "упал" if result["fail_step"] is not None else "устоял"
-    mode = f" {label}" if label else (" roll_damped" if roll_damped else "")
     print(
-        f"контроль стойки kp={kp:g} kd={kd:g}{mode}: z_start={result['z_start']:.4f} "
+        f"контроль стойки kp={kp:g} kd={kd:g}: z_start={result['z_start']:.4f} "
         f"z_end={result['z_end']:.4f} {status}"
     )
     return result
@@ -558,18 +335,12 @@ def run_stress_batch(
     kp: float,
     kd: float,
     keep_windows: bool,
-    roll_damped: bool = False,
-    roll_sign: float = 1.0,
-    k_roll_p: float | None = None,
-    k_roll_d: float | None = None,
 ) -> dict:
     failed_episodes: list[dict] = []
     failed_friction: list[float] = []
     failed_force: list[float] = []
     survived_friction: list[float] = []
     survived_force: list[float] = []
-    episode_mean_abs: list[float] = []
-    episode_mean_abs_hip: list[float] = []
 
     for episode, (friction, lateral_force) in enumerate(specs, start=1):
         reset_to_stance(model, data)
@@ -578,8 +349,6 @@ def run_stress_batch(
 
         window: deque[dict] | None = deque(maxlen=WINDOW_SIZE) if keep_windows else None
         episode_failed = False
-        step_abs: list[float] = []
-        step_abs_hip: list[float] = []
         params = {
             "episode": episode,
             "friction": friction,
@@ -590,26 +359,10 @@ def run_stress_batch(
             "floor_geom_id": int(floor_id),
             "kp": kp,
             "kd": kd,
-            "roll_damped": roll_damped,
-            "roll_sign": roll_sign,
-            "k_roll_p": k_roll_p,
-            "k_roll_d": k_roll_d,
         }
 
         for step in range(1, MAX_STEPS + 1):
-            mean_abs, mean_abs_hip = apply_pd(
-                model,
-                data,
-                target_qpos,
-                kp=kp,
-                kd=kd,
-                roll_damped=roll_damped,
-                roll_sign=roll_sign,
-                k_roll_p=k_roll_p,
-                k_roll_d=k_roll_d,
-            )
-            step_abs.append(mean_abs)
-            step_abs_hip.append(mean_abs_hip)
+            apply_pd(model, data, target_qpos, kp=kp, kd=kd)
             apply_torso_impulse(data, torso_body_id, step, lateral_force)
             mujoco.mj_step(model, data)
             z = float(data.qpos[2])
@@ -631,10 +384,6 @@ def run_stress_batch(
                 failed_force.append(lateral_force)
                 episode_failed = True
                 break
-
-        if step_abs:
-            episode_mean_abs.append(float(np.mean(step_abs)))
-            episode_mean_abs_hip.append(float(np.mean(step_abs_hip)))
 
         if not episode_failed:
             survived_friction.append(friction)
@@ -662,15 +411,16 @@ def run_stress_batch(
         "failed_force": failed_force,
         "survived_friction": survived_friction,
         "survived_force": survived_force,
-        "mean_abs_dctrl": float(np.mean(episode_mean_abs)) if episode_mean_abs else 0.0,
-        "mean_abs_dctrl_hip": (
-            float(np.mean(episode_mean_abs_hip)) if episode_mean_abs_hip else 0.0
-        ),
-        "n_episodes_ctrl": len(episode_mean_abs),
     }
 
 
 def main() -> None:
+    args = parse_args()
+    mode_name = args.mode
+    mode = PD_MODES[mode_name]
+    main_kp = float(mode["kp"])
+    main_kd = float(mode["kd"])
+
     model = mujoco.MjModel.from_xml_path(MODEL_PATH)
     data = mujoco.MjData(model)
     floor_id = find_floor_geom_id(model)
@@ -683,6 +433,7 @@ def main() -> None:
         f"корпус для импульса: id={torso_body_id} name={torso_name!r} "
         f"xfrc_applied[:, 1], шаги {IMPULSE_START}..{IMPULSE_END}"
     )
+    print(f"основной режим: {mode_name} kp={main_kp:g} kd={main_kd:g}")
 
     reset_to_stance(model, data)
     target_qpos = np.array(data.qpos[7:], copy=True)
@@ -691,11 +442,9 @@ def main() -> None:
             f"число актуаторов ({model.nu}) не совпадает с числом суставов ({len(target_qpos)})"
         )
 
-    global LEFT_HIP_IDX, RIGHT_HIP_IDX
-    LEFT_HIP_IDX, RIGHT_HIP_IDX = resolve_hip_actuators(model)
-    debug_roll_ctrl_delta(model, data, target_qpos, friction_geoms, torso_body_id)
-
-    probe_friction_effect(model, data, target_qpos, friction_geoms, torso_body_id)
+    probe_friction_effect(
+        model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
+    )
 
     rng = np.random.default_rng()
     specs = [
@@ -705,29 +454,13 @@ def main() -> None:
 
     print("\nсравнение PD (стойка: μ=0.8, Fy=0; батч на тех же эпизодах):")
     main_batch = None
-    for variant in PD_VARIANTS:
-        name = variant["name"]
-        kp = variant["kp"]
-        kd = variant["kd"]
-        roll_damped = bool(variant["roll_damped"])
-        roll_sign = float(variant.get("roll_sign", 1.0))
-        k_roll_p = variant.get("k_roll_p")
-        k_roll_d = variant.get("k_roll_d")
+    for name, gains in PD_MODES.items():
+        kp = float(gains["kp"])
+        kd = float(gains["kd"])
         stance = probe_stance_hold(
-            model,
-            data,
-            target_qpos,
-            friction_geoms,
-            torso_body_id,
-            kp=kp,
-            kd=kd,
-            roll_damped=roll_damped,
-            roll_sign=roll_sign,
-            k_roll_p=k_roll_p,
-            k_roll_d=k_roll_d,
-            label=name if roll_damped else "",
+            model, data, target_qpos, friction_geoms, torso_body_id, kp=kp, kd=kd
         )
-        keep_windows = name == PD_VARIANTS[0]["name"]
+        keep_windows = name == mode_name
         batch = run_stress_batch(
             model,
             data,
@@ -739,32 +472,15 @@ def main() -> None:
             kp,
             kd,
             keep_windows=keep_windows,
-            roll_damped=roll_damped,
-            roll_sign=roll_sign,
-            k_roll_p=k_roll_p,
-            k_roll_d=k_roll_d,
         )
-        extra = ""
-        if roll_damped:
-            kp_r = K_ROLL_P if k_roll_p is None else k_roll_p
-            kd_r = K_ROLL_D if k_roll_d is None else k_roll_d
-            extra = f"  sign={roll_sign:+g} Kp_roll={kp_r:g} Kd_roll={kd_r:g}"
         print(
-            f"  {name}: kp={kp:g} kd={kd:g}{extra}  "
+            f"  {name}: kp={kp:g} kd={kd:g}  "
             f"z_end={stance['z_end']:.4f}  "
             f"сбои={batch['failure_rate'] * 100:.1f}% "
             f"({batch['n_failures']}/{batch['n_episodes']})  "
             f"до шага {IMPULSE_START}: {batch['n_before_impact']}  "
-            f"при/после {IMPULSE_START}: {batch['n_at_or_after_impact']}  "
-            f"mean|Δctrl|={batch['mean_abs_dctrl']:.4f}  "
-            f"hip={batch['mean_abs_dctrl_hip']:.4f}  "
-            f"(n={batch['n_episodes_ctrl']})"
+            f"при/после {IMPULSE_START}: {batch['n_at_or_after_impact']}"
         )
-        if roll_damped and batch["mean_abs_dctrl_hip"] < 1e-9:
-            print(
-                f"  предупреждение: {name} в батче дал mean|Δctrl|_hip≈0, "
-                "поправка не попала в ctrl цикла прогона"
-            )
         if keep_windows:
             main_batch = batch
 
@@ -780,7 +496,7 @@ def main() -> None:
     survived_friction_stats = value_stats(main_batch["survived_friction"])
     survived_force_stats = value_stats(main_batch["survived_force"])
 
-    print(f"\nосновной прогон (kp={main_batch['kp']:g}, kd={main_batch['kd']:g}):")
+    print(f"\nосновной прогон ({mode_name}, kp={main_batch['kp']:g}, kd={main_batch['kd']:g}):")
     print(f"всего прогонов: {N_EPISODES}")
     print(f"упало: {n_failures}")
     print(f"устояло: {n_survived}")
@@ -795,6 +511,7 @@ def main() -> None:
         "n_failures": n_failures,
         "n_survived": n_survived,
         "failure_rate": failure_rate,
+        "mode": mode_name,
         "kp": main_batch["kp"],
         "kd": main_batch["kd"],
         "floor_geom_id": int(floor_id),
