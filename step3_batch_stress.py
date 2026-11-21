@@ -11,9 +11,11 @@ MAX_STEPS = 1500
 WINDOW_SIZE = 200
 FALL_HEIGHT = 0.20
 FRICTION_RANGE = (0.05, 1.0)
-LATERAL_VEL_RANGE = (-1.8, 1.8)
+LATERAL_FORCE_RANGE = (-350.0, 350.0)
+IMPULSE_START = 450
+IMPULSE_END = 500
 PROBE_FRICTIONS = (0.05, 1.0)
-PROBE_LATERAL_VEL = 0.8
+PROBE_LATERAL_FORCE = 180.0
 KP = 25.0
 KD = 1.5
 REPORT_PATH = Path("reports") / "batch_failures.json"
@@ -47,6 +49,22 @@ def find_floor_geom_id(model: mujoco.MjModel) -> int:
         if int(model.geom_type[geom_id]) == int(mujoco.mjtGeom.mjGEOM_PLANE):
             return geom_id
     return 0
+
+
+def find_torso_body_id(model: mujoco.MjModel) -> int:
+    for name in ("torso", "base", "trunk"):
+        body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+        if body_id >= 0:
+            return int(body_id)
+    return 1
+
+
+def apply_torso_impulse(
+    data: mujoco.MjData, torso_body_id: int, step: int, force: float
+) -> None:
+    data.xfrc_applied[torso_body_id] = 0.0
+    if IMPULSE_START <= step <= IMPULSE_END:
+        data.xfrc_applied[torso_body_id, 1] = force
 
 
 def find_foot_geom_ids(model: mujoco.MjModel) -> list[int]:
@@ -145,11 +163,11 @@ def run_controlled_episode(
     target_qpos: np.ndarray,
     friction_geoms: list[int],
     friction: float,
-    lateral_vel: float,
+    lateral_force: float,
+    torso_body_id: int,
 ) -> dict:
     reset_to_stance(model, data)
     set_sliding_friction(model, friction_geoms, friction)
-    data.qvel[1] = lateral_vel
     mujoco.mj_forward(model, data)
 
     contact_friction = None
@@ -161,6 +179,7 @@ def run_controlled_episode(
     fail_step = None
     for step in range(1, MAX_STEPS + 1):
         apply_pd(model, data, target_qpos)
+        apply_torso_impulse(data, torso_body_id, step, lateral_force)
         mujoco.mj_step(model, data)
         z = float(data.qpos[2])
         zs.append(z)
@@ -174,7 +193,7 @@ def run_controlled_episode(
     }
     return {
         "friction": friction,
-        "lateral_vel": lateral_vel,
+        "lateral_force": lateral_force,
         "written_sliding": written,
         "contact_friction": contact_friction,
         "fail_step": fail_step,
@@ -193,14 +212,21 @@ def probe_friction_effect(
     data: mujoco.MjData,
     target_qpos: np.ndarray,
     friction_geoms: list[int],
+    torso_body_id: int,
 ) -> None:
     print(
-        f"\nпроверка трения: vy={PROBE_LATERAL_VEL} м/с, "
-        f"friction={list(PROBE_FRICTIONS)}"
+        f"\nпроверка трения: Fy={PROBE_LATERAL_FORCE:.1f} Н на шагах "
+        f"{IMPULSE_START}..{IMPULSE_END}, friction={list(PROBE_FRICTIONS)}"
     )
     results = [
         run_controlled_episode(
-            model, data, target_qpos, friction_geoms, mu, PROBE_LATERAL_VEL
+            model,
+            data,
+            target_qpos,
+            friction_geoms,
+            mu,
+            PROBE_LATERAL_FORCE,
+            torso_body_id,
         )
         for mu in PROBE_FRICTIONS
     ]
@@ -234,8 +260,14 @@ def main() -> None:
     data = mujoco.MjData(model)
     floor_id = find_floor_geom_id(model)
     foot_ids = find_foot_geom_ids(model)
+    torso_body_id = find_torso_body_id(model)
+    torso_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, torso_body_id) or ""
     friction_geoms = [floor_id] + [geom_id for geom_id in foot_ids if geom_id != floor_id]
     print_floor_selection(model, floor_id, foot_ids)
+    print(
+        f"корпус для импульса: id={torso_body_id} name={torso_name!r} "
+        f"xfrc_applied[:, 1], шаги {IMPULSE_START}..{IMPULSE_END}"
+    )
 
     reset_to_stance(model, data)
     target_qpos = np.array(data.qpos[7:], copy=True)
@@ -244,22 +276,21 @@ def main() -> None:
             f"число актуаторов ({model.nu}) не совпадает с числом суставов ({len(target_qpos)})"
         )
 
-    probe_friction_effect(model, data, target_qpos, friction_geoms)
+    probe_friction_effect(model, data, target_qpos, friction_geoms, torso_body_id)
 
     rng = np.random.default_rng()
     failed_episodes: list[dict] = []
     failed_friction: list[float] = []
-    failed_lateral: list[float] = []
+    failed_force: list[float] = []
     survived_friction: list[float] = []
-    survived_lateral: list[float] = []
+    survived_force: list[float] = []
 
     for episode in range(1, N_EPISODES + 1):
         reset_to_stance(model, data)
 
         friction = float(rng.uniform(*FRICTION_RANGE))
-        lateral_vel = float(rng.uniform(*LATERAL_VEL_RANGE))
+        lateral_force = float(rng.uniform(*LATERAL_FORCE_RANGE))
         set_sliding_friction(model, friction_geoms, friction)
-        data.qvel[1] = lateral_vel
         mujoco.mj_forward(model, data)
 
         window: deque[dict] = deque(maxlen=WINDOW_SIZE)
@@ -267,12 +298,16 @@ def main() -> None:
         params = {
             "episode": episode,
             "friction": friction,
-            "lateral_vel": lateral_vel,
+            "lateral_force": lateral_force,
+            "impulse_start": IMPULSE_START,
+            "impulse_end": IMPULSE_END,
+            "torso_body_id": int(torso_body_id),
             "floor_geom_id": int(floor_id),
         }
 
         for step in range(1, MAX_STEPS + 1):
             apply_pd(model, data, target_qpos)
+            apply_torso_impulse(data, torso_body_id, step, lateral_force)
             mujoco.mj_step(model, data)
             z = float(data.qpos[2])
             window.append(snapshot(step, data, z))
@@ -288,30 +323,30 @@ def main() -> None:
                     }
                 )
                 failed_friction.append(friction)
-                failed_lateral.append(lateral_vel)
+                failed_force.append(lateral_force)
                 episode_failed = True
                 break
 
         if not episode_failed:
             survived_friction.append(friction)
-            survived_lateral.append(lateral_vel)
+            survived_force.append(lateral_force)
 
     n_failures = len(failed_episodes)
     n_survived = N_EPISODES - n_failures
     failure_rate = n_failures / N_EPISODES
     failed_friction_stats = value_stats(failed_friction)
-    failed_lateral_stats = value_stats(failed_lateral)
+    failed_force_stats = value_stats(failed_force)
     survived_friction_stats = value_stats(survived_friction)
-    survived_lateral_stats = value_stats(survived_lateral)
+    survived_force_stats = value_stats(survived_force)
 
     print(f"всего прогонов: {N_EPISODES}")
     print(f"упало: {n_failures}")
     print(f"устояло: {n_survived}")
     print(f"процент сбоев: {failure_rate * 100:.1f}%")
     print(f"упавшие, трение: {format_stats(failed_friction_stats)}")
-    print(f"упавшие, боковая скорость: {format_stats(failed_lateral_stats)}")
+    print(f"упавшие, боковая сила: {format_stats(failed_force_stats)}")
     print(f"устоявшие, трение: {format_stats(survived_friction_stats)}")
-    print(f"устоявшие, боковая скорость: {format_stats(survived_lateral_stats)}")
+    print(f"устоявшие, боковая сила: {format_stats(survived_force_stats)}")
 
     report = {
         "n_episodes": N_EPISODES,
@@ -325,14 +360,17 @@ def main() -> None:
         "floor_geom_type": geom_type_name(model, floor_id),
         "geom_friction_shape": list(model.geom_friction.shape),
         "friction_geom_ids": friction_geoms,
+        "torso_body_id": int(torso_body_id),
+        "impulse_start": IMPULSE_START,
+        "impulse_end": IMPULSE_END,
         "target_qpos": target_qpos.tolist(),
         "failed": {
             "friction": failed_friction_stats,
-            "lateral_vel": failed_lateral_stats,
+            "lateral_force": failed_force_stats,
         },
         "survived": {
             "friction": survived_friction_stats,
-            "lateral_vel": survived_lateral_stats,
+            "lateral_force": survived_force_stats,
         },
         "failures": failed_episodes,
     }
