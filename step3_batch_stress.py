@@ -20,9 +20,17 @@ STANCE_CHECK_FRICTION = 0.8
 STANCE_CHECK_FORCE = 0.0
 KP = 25.0
 KD = 1.5
+K_ROLL_P = -5.0
+K_ROLL_D = -3.0
+K_ROLL_THIGH = 0.0
+LEFT_HIP_IDX = (0, 6)
+RIGHT_HIP_IDX = (3, 9)
+LEFT_THIGH_IDX = (1, 7)
+RIGHT_THIGH_IDX = (4, 10)
 PD_VARIANTS = (
-    ("baseline", 25.0, 1.5),
-    ("stiff", 40.0, 3.0),
+    {"name": "baseline", "kp": 25.0, "kd": 1.5, "roll_damped": False},
+    {"name": "stiff", "kp": 40.0, "kd": 3.0, "roll_damped": False},
+    {"name": "roll_damped", "kp": 25.0, "kd": 1.5, "roll_damped": True},
 )
 REPORT_PATH = Path("reports") / "batch_failures.json"
 
@@ -133,16 +141,44 @@ def reset_to_stance(model: mujoco.MjModel, data: mujoco.MjData) -> None:
         mujoco.mj_resetDataKeyframe(model, data, 0)
 
 
+def body_roll(qpos) -> float:
+    w, x, y, z = (float(qpos[3]), float(qpos[4]), float(qpos[5]), float(qpos[6]))
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    return float(np.arctan2(sinr_cosp, cosr_cosp))
+
+
 def apply_pd(
     model: mujoco.MjModel,
     data: mujoco.MjData,
     target_qpos: np.ndarray,
     kp: float = KP,
     kd: float = KD,
+    roll_damped: bool = False,
 ) -> None:
     if model.nu != len(target_qpos):
         return
     data.ctrl[:] = kp * (target_qpos - data.qpos[7:]) - kd * data.qvel[6:]
+    if not roll_damped:
+        return
+    roll = body_roll(data.qpos)
+    roll_rate = float(data.qvel[3])
+    u = -K_ROLL_P * roll - K_ROLL_D * roll_rate
+    for idx in LEFT_HIP_IDX:
+        data.ctrl[idx] -= u
+    for idx in RIGHT_HIP_IDX:
+        data.ctrl[idx] += u
+    u_thigh = K_ROLL_THIGH * u
+    for idx in LEFT_THIGH_IDX:
+        data.ctrl[idx] -= u_thigh
+    for idx in RIGHT_THIGH_IDX:
+        data.ctrl[idx] += u_thigh
+    np.clip(
+        data.ctrl,
+        model.actuator_ctrlrange[:, 0],
+        model.actuator_ctrlrange[:, 1],
+        out=data.ctrl,
+    )
 
 
 def snapshot(step: int, data: mujoco.MjData, z: float) -> dict:
@@ -187,6 +223,7 @@ def run_controlled_episode(
     torso_body_id: int,
     kp: float = KP,
     kd: float = KD,
+    roll_damped: bool = False,
 ) -> dict:
     reset_to_stance(model, data)
     set_sliding_friction(model, friction_geoms, friction)
@@ -201,7 +238,7 @@ def run_controlled_episode(
     ys: list[float] = []
     fail_step = None
     for step in range(1, MAX_STEPS + 1):
-        apply_pd(model, data, target_qpos, kp=kp, kd=kd)
+        apply_pd(model, data, target_qpos, kp=kp, kd=kd, roll_damped=roll_damped)
         apply_torso_impulse(data, torso_body_id, step, lateral_force)
         mujoco.mj_step(model, data)
         z = float(data.qpos[2])
@@ -287,6 +324,7 @@ def probe_stance_hold(
     torso_body_id: int,
     kp: float = KP,
     kd: float = KD,
+    roll_damped: bool = False,
 ) -> dict:
     result = run_controlled_episode(
         model,
@@ -298,10 +336,12 @@ def probe_stance_hold(
         torso_body_id,
         kp=kp,
         kd=kd,
+        roll_damped=roll_damped,
     )
     status = "упал" if result["fail_step"] is not None else "устоял"
+    mode = " roll_damped" if roll_damped else ""
     print(
-        f"контроль стойки kp={kp:g} kd={kd:g}: z_start={result['z_start']:.4f} "
+        f"контроль стойки kp={kp:g} kd={kd:g}{mode}: z_start={result['z_start']:.4f} "
         f"z_end={result['z_end']:.4f} {status}"
     )
     return result
@@ -318,6 +358,7 @@ def run_stress_batch(
     kp: float,
     kd: float,
     keep_windows: bool,
+    roll_damped: bool = False,
 ) -> dict:
     failed_episodes: list[dict] = []
     failed_friction: list[float] = []
@@ -342,10 +383,11 @@ def run_stress_batch(
             "floor_geom_id": int(floor_id),
             "kp": kp,
             "kd": kd,
+            "roll_damped": roll_damped,
         }
 
         for step in range(1, MAX_STEPS + 1):
-            apply_pd(model, data, target_qpos, kp=kp, kd=kd)
+            apply_pd(model, data, target_qpos, kp=kp, kd=kd, roll_damped=roll_damped)
             apply_torso_impulse(data, torso_body_id, step, lateral_force)
             mujoco.mj_step(model, data)
             z = float(data.qpos[2])
@@ -428,11 +470,22 @@ def main() -> None:
 
     print("\nсравнение PD (стойка: μ=0.8, Fy=0; батч на тех же эпизодах):")
     main_batch = None
-    for name, kp, kd in PD_VARIANTS:
+    for variant in PD_VARIANTS:
+        name = variant["name"]
+        kp = variant["kp"]
+        kd = variant["kd"]
+        roll_damped = bool(variant["roll_damped"])
         stance = probe_stance_hold(
-            model, data, target_qpos, friction_geoms, torso_body_id, kp=kp, kd=kd
+            model,
+            data,
+            target_qpos,
+            friction_geoms,
+            torso_body_id,
+            kp=kp,
+            kd=kd,
+            roll_damped=roll_damped,
         )
-        keep_windows = name == PD_VARIANTS[0][0]
+        keep_windows = name == PD_VARIANTS[0]["name"]
         batch = run_stress_batch(
             model,
             data,
@@ -444,6 +497,7 @@ def main() -> None:
             kp,
             kd,
             keep_windows=keep_windows,
+            roll_damped=roll_damped,
         )
         print(
             f"  {name}: kp={kp:g} kd={kd:g}  "
