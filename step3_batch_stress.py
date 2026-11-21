@@ -20,6 +20,10 @@ STANCE_CHECK_FRICTION = 0.8
 STANCE_CHECK_FORCE = 0.0
 KP = 25.0
 KD = 1.5
+PD_VARIANTS = (
+    ("baseline", 25.0, 1.5),
+    ("stiff", 40.0, 3.0),
+)
 REPORT_PATH = Path("reports") / "batch_failures.json"
 
 GEOM_TYPE_NAMES = {
@@ -129,10 +133,16 @@ def reset_to_stance(model: mujoco.MjModel, data: mujoco.MjData) -> None:
         mujoco.mj_resetDataKeyframe(model, data, 0)
 
 
-def apply_pd(model: mujoco.MjModel, data: mujoco.MjData, target_qpos: np.ndarray) -> None:
+def apply_pd(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    kp: float = KP,
+    kd: float = KD,
+) -> None:
     if model.nu != len(target_qpos):
         return
-    data.ctrl[:] = KP * (target_qpos - data.qpos[7:]) - KD * data.qvel[6:]
+    data.ctrl[:] = kp * (target_qpos - data.qpos[7:]) - kd * data.qvel[6:]
 
 
 def snapshot(step: int, data: mujoco.MjData, z: float) -> dict:
@@ -175,6 +185,8 @@ def run_controlled_episode(
     friction: float,
     lateral_force: float,
     torso_body_id: int,
+    kp: float = KP,
+    kd: float = KD,
 ) -> dict:
     reset_to_stance(model, data)
     set_sliding_friction(model, friction_geoms, friction)
@@ -189,7 +201,7 @@ def run_controlled_episode(
     ys: list[float] = []
     fail_step = None
     for step in range(1, MAX_STEPS + 1):
-        apply_pd(model, data, target_qpos)
+        apply_pd(model, data, target_qpos, kp=kp, kd=kd)
         apply_torso_impulse(data, torso_body_id, step, lateral_force)
         mujoco.mj_step(model, data)
         z = float(data.qpos[2])
@@ -273,7 +285,9 @@ def probe_stance_hold(
     target_qpos: np.ndarray,
     friction_geoms: list[int],
     torso_body_id: int,
-) -> None:
+    kp: float = KP,
+    kd: float = KD,
+) -> dict:
     result = run_controlled_episode(
         model,
         data,
@@ -282,12 +296,97 @@ def probe_stance_hold(
         STANCE_CHECK_FRICTION,
         STANCE_CHECK_FORCE,
         torso_body_id,
+        kp=kp,
+        kd=kd,
     )
     status = "упал" if result["fail_step"] is not None else "устоял"
     print(
-        f"контроль стойки: z_start={result['z_start']:.4f} "
+        f"контроль стойки kp={kp:g} kd={kd:g}: z_start={result['z_start']:.4f} "
         f"z_end={result['z_end']:.4f} {status}"
     )
+    return result
+
+
+def run_stress_batch(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    floor_id: int,
+    specs: list[tuple[float, float]],
+    kp: float,
+    kd: float,
+    keep_windows: bool,
+) -> dict:
+    failed_episodes: list[dict] = []
+    failed_friction: list[float] = []
+    failed_force: list[float] = []
+    survived_friction: list[float] = []
+    survived_force: list[float] = []
+
+    for episode, (friction, lateral_force) in enumerate(specs, start=1):
+        reset_to_stance(model, data)
+        set_sliding_friction(model, friction_geoms, friction)
+        mujoco.mj_forward(model, data)
+
+        window: deque[dict] | None = deque(maxlen=WINDOW_SIZE) if keep_windows else None
+        episode_failed = False
+        params = {
+            "episode": episode,
+            "friction": friction,
+            "lateral_force": lateral_force,
+            "impulse_start": IMPULSE_START,
+            "impulse_end": IMPULSE_END,
+            "torso_body_id": int(torso_body_id),
+            "floor_geom_id": int(floor_id),
+            "kp": kp,
+            "kd": kd,
+        }
+
+        for step in range(1, MAX_STEPS + 1):
+            apply_pd(model, data, target_qpos, kp=kp, kd=kd)
+            apply_torso_impulse(data, torso_body_id, step, lateral_force)
+            mujoco.mj_step(model, data)
+            z = float(data.qpos[2])
+            if window is not None:
+                window.append(snapshot(step, data, z))
+
+            if z < FALL_HEIGHT:
+                record = {
+                    **params,
+                    "fail_step": step,
+                    "fail_time": float(data.time),
+                    "final_z": z,
+                    "impact_phase": impact_phase(step),
+                }
+                if window is not None:
+                    record["window"] = list(window)
+                failed_episodes.append(record)
+                failed_friction.append(friction)
+                failed_force.append(lateral_force)
+                episode_failed = True
+                break
+
+        if not episode_failed:
+            survived_friction.append(friction)
+            survived_force.append(lateral_force)
+
+    n_episodes = len(specs)
+    n_failures = len(failed_episodes)
+    return {
+        "kp": kp,
+        "kd": kd,
+        "n_episodes": n_episodes,
+        "n_failures": n_failures,
+        "n_survived": n_episodes - n_failures,
+        "failure_rate": n_failures / n_episodes if n_episodes else 0.0,
+        "failed_episodes": failed_episodes,
+        "failed_friction": failed_friction,
+        "failed_force": failed_force,
+        "survived_friction": survived_friction,
+        "survived_force": survived_force,
+    }
 
 
 def main() -> None:
@@ -311,71 +410,55 @@ def main() -> None:
             f"число актуаторов ({model.nu}) не совпадает с числом суставов ({len(target_qpos)})"
         )
 
-    probe_stance_hold(model, data, target_qpos, friction_geoms, torso_body_id)
     probe_friction_effect(model, data, target_qpos, friction_geoms, torso_body_id)
 
     rng = np.random.default_rng()
-    failed_episodes: list[dict] = []
-    failed_friction: list[float] = []
-    failed_force: list[float] = []
-    survived_friction: list[float] = []
-    survived_force: list[float] = []
+    specs = [
+        (float(rng.uniform(*FRICTION_RANGE)), float(rng.uniform(*LATERAL_FORCE_RANGE)))
+        for _ in range(N_EPISODES)
+    ]
 
-    for episode in range(1, N_EPISODES + 1):
-        reset_to_stance(model, data)
+    print("\nсравнение PD (стойка: μ=0.8, Fy=0; батч на тех же эпизодах):")
+    main_batch = None
+    for name, kp, kd in PD_VARIANTS:
+        stance = probe_stance_hold(
+            model, data, target_qpos, friction_geoms, torso_body_id, kp=kp, kd=kd
+        )
+        keep_windows = name == PD_VARIANTS[0][0]
+        batch = run_stress_batch(
+            model,
+            data,
+            target_qpos,
+            friction_geoms,
+            torso_body_id,
+            floor_id,
+            specs,
+            kp,
+            kd,
+            keep_windows=keep_windows,
+        )
+        print(
+            f"  {name}: kp={kp:g} kd={kd:g}  "
+            f"z_end={stance['z_end']:.4f}  "
+            f"сбои={batch['failure_rate'] * 100:.1f}% "
+            f"({batch['n_failures']}/{batch['n_episodes']})"
+        )
+        if keep_windows:
+            main_batch = batch
 
-        friction = float(rng.uniform(*FRICTION_RANGE))
-        lateral_force = float(rng.uniform(*LATERAL_FORCE_RANGE))
-        set_sliding_friction(model, friction_geoms, friction)
-        mujoco.mj_forward(model, data)
+    if main_batch is None:
+        raise RuntimeError("не удалось выполнить основной прогон PD")
 
-        window: deque[dict] = deque(maxlen=WINDOW_SIZE)
-        episode_failed = False
-        params = {
-            "episode": episode,
-            "friction": friction,
-            "lateral_force": lateral_force,
-            "impulse_start": IMPULSE_START,
-            "impulse_end": IMPULSE_END,
-            "torso_body_id": int(torso_body_id),
-            "floor_geom_id": int(floor_id),
-        }
+    n_failures = main_batch["n_failures"]
+    n_survived = main_batch["n_survived"]
+    failure_rate = main_batch["failure_rate"]
+    failed_episodes = main_batch["failed_episodes"]
+    failed_friction_stats = value_stats(main_batch["failed_friction"])
+    failed_force_stats = value_stats(main_batch["failed_force"])
+    survived_friction_stats = value_stats(main_batch["survived_friction"])
+    survived_force_stats = value_stats(main_batch["survived_force"])
 
-        for step in range(1, MAX_STEPS + 1):
-            apply_pd(model, data, target_qpos)
-            apply_torso_impulse(data, torso_body_id, step, lateral_force)
-            mujoco.mj_step(model, data)
-            z = float(data.qpos[2])
-            window.append(snapshot(step, data, z))
-
-            if z < FALL_HEIGHT:
-                failed_episodes.append(
-                    {
-                        **params,
-                        "fail_step": step,
-                        "fail_time": float(data.time),
-                        "final_z": z,
-                        "impact_phase": impact_phase(step),
-                        "window": list(window),
-                    }
-                )
-                failed_friction.append(friction)
-                failed_force.append(lateral_force)
-                episode_failed = True
-                break
-
-        if not episode_failed:
-            survived_friction.append(friction)
-            survived_force.append(lateral_force)
-
-    n_failures = len(failed_episodes)
-    n_survived = N_EPISODES - n_failures
-    failure_rate = n_failures / N_EPISODES
-    failed_friction_stats = value_stats(failed_friction)
-    failed_force_stats = value_stats(failed_force)
-    survived_friction_stats = value_stats(survived_friction)
-    survived_force_stats = value_stats(survived_force)
-
+    print(f"\nосновной прогон (kp={main_batch['kp']:g}, kd={main_batch['kd']:g}):")
     print(f"всего прогонов: {N_EPISODES}")
     print(f"упало: {n_failures}")
     print(f"устояло: {n_survived}")
@@ -390,8 +473,8 @@ def main() -> None:
         "n_failures": n_failures,
         "n_survived": n_survived,
         "failure_rate": failure_rate,
-        "kp": KP,
-        "kd": KD,
+        "kp": main_batch["kp"],
+        "kd": main_batch["kd"],
         "floor_geom_id": int(floor_id),
         "floor_geom_name": geom_name(model, floor_id),
         "floor_geom_type": geom_type_name(model, floor_id),

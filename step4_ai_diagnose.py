@@ -229,7 +229,7 @@ def mixed_comment(ep: dict) -> str:
     sag_like = friction < 0.40 and roll <= 1.2 and (before or z_drop >= 0.03 or speed < 0.35)
     if sag_like and not near_overturn:
         return (
-            "Преобладает низкое/среднее трение с просадкой корпуса "
+            "Преобладает низкое или среднее трение с просадкой корпуса "
             "(крен слабый, это ближе к разъезжанию, но μ >= 0.15, поэтому не отдельная категория)."
         )
     if near_overturn:
