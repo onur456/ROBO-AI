@@ -20,13 +20,21 @@ STANCE_CHECK_FRICTION = 0.8
 STANCE_CHECK_FORCE = 0.0
 KP = 25.0
 KD = 1.5
-K_ROLL_P = -5.0
-K_ROLL_D = -3.0
+# Оси всех hip abduction совпадают с +X корпуса: +ctrl на любом бедре
+# даёт −τ_roll на torso. Одинаковый знак на левой и правой стороне.
+# Старое left -= u / right += u давало сумму поправок ≈ 0.
+K_ROLL_P = 5.0
+K_ROLL_D = 3.0
 K_ROLL_THIGH = 0.0
 LEFT_HIP_IDX = (0, 6)
 RIGHT_HIP_IDX = (3, 9)
 LEFT_THIGH_IDX = (1, 7)
 RIGHT_THIGH_IDX = (4, 10)
+HIP_ACTUATOR_NAMES = ("FL_hip", "FR_hip", "RL_hip", "RR_hip")
+DEBUG_DELTA_FRICTION = 0.8
+DEBUG_DELTA_FORCE = 250.0
+DEBUG_DELTA_START = 450
+DEBUG_DELTA_END = 550
 PD_VARIANTS = (
     {"name": "baseline", "kp": 25.0, "kd": 1.5, "roll_damped": False},
     {"name": "stiff", "kp": 40.0, "kd": 3.0, "roll_damped": False},
@@ -148,6 +156,32 @@ def body_roll(qpos) -> float:
     return float(np.arctan2(sinr_cosp, cosr_cosp))
 
 
+def actuator_index(model: mujoco.MjModel, name: str) -> int:
+    act_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+    if act_id < 0:
+        raise RuntimeError(f"нет актуатора {name!r}")
+    return int(act_id)
+
+
+def resolve_hip_actuators(model: mujoco.MjModel) -> tuple[tuple[int, int], tuple[int, int]]:
+    left = (
+        actuator_index(model, "FL_hip"),
+        actuator_index(model, "RL_hip"),
+    )
+    right = (
+        actuator_index(model, "FR_hip"),
+        actuator_index(model, "RR_hip"),
+    )
+    return left, right
+
+
+def hip_world_axis(model: mujoco.MjModel, data: mujoco.MjData, act_id: int) -> np.ndarray:
+    joint_id = int(model.actuator_trnid[act_id, 0])
+    body_id = int(model.jnt_bodyid[joint_id])
+    axis_world = data.xmat[body_id].reshape(3, 3) @ model.jnt_axis[joint_id]
+    return np.asarray(axis_world, dtype=float)
+
+
 def apply_pd(
     model: mujoco.MjModel,
     data: mujoco.MjData,
@@ -163,22 +197,138 @@ def apply_pd(
         return
     roll = body_roll(data.qpos)
     roll_rate = float(data.qvel[3])
-    u = -K_ROLL_P * roll - K_ROLL_D * roll_rate
-    for idx in LEFT_HIP_IDX:
-        data.ctrl[idx] -= u
-    for idx in RIGHT_HIP_IDX:
+    # +u на всех четырёх abduction: +ctrl → −qacc_roll, поэтому
+    # u имеет знак roll / qvel[3] и гасит крен, а не обнуляется.
+    u = K_ROLL_P * roll + K_ROLL_D * roll_rate
+    for idx in (*LEFT_HIP_IDX, *RIGHT_HIP_IDX):
         data.ctrl[idx] += u
-    u_thigh = K_ROLL_THIGH * u
-    for idx in LEFT_THIGH_IDX:
-        data.ctrl[idx] -= u_thigh
-    for idx in RIGHT_THIGH_IDX:
-        data.ctrl[idx] += u_thigh
+    if K_ROLL_THIGH:
+        u_thigh = K_ROLL_THIGH * u
+        for idx in LEFT_THIGH_IDX:
+            data.ctrl[idx] -= u_thigh
+        for idx in RIGHT_THIGH_IDX:
+            data.ctrl[idx] += u_thigh
     np.clip(
         data.ctrl,
         model.actuator_ctrlrange[:, 0],
         model.actuator_ctrlrange[:, 1],
         out=data.ctrl,
     )
+
+
+def debug_roll_ctrl_delta(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+) -> None:
+    print("\nотладка roll_damped: актуаторы abduction / знак qvel[3] / Δctrl 450..550")
+    reset_to_stance(model, data)
+    mujoco.mj_forward(model, data)
+    hip_ids = [actuator_index(model, name) for name in HIP_ACTUATOR_NAMES]
+    for name, act_id in zip(HIP_ACTUATOR_NAMES, hip_ids):
+        side = "left" if act_id in LEFT_HIP_IDX else "right"
+        axis = hip_world_axis(model, data, act_id)
+        print(
+            f"  {act_id} {name}  {side}  axis_world={np.round(axis, 4).tolist()}  "
+            f"ctrlrange={model.actuator_ctrlrange[act_id].tolist()}"
+        )
+    print(
+        f"  LEFT_HIP_IDX={LEFT_HIP_IDX} RIGHT_HIP_IDX={RIGHT_HIP_IDX}  "
+        f"K_ROLL_P={K_ROLL_P:g} K_ROLL_D={K_ROLL_D:g}"
+    )
+    print("  все оси +X: left и right должны получать ОДИНАКОВЫЙ знак поправки к qvel[3]")
+
+    set_sliding_friction(model, friction_geoms, DEBUG_DELTA_FRICTION)
+    reset_to_stance(model, data)
+    mujoco.mj_forward(model, data)
+
+    max_abs = -1.0
+    max_info: dict | None = None
+    n_window = 0
+    abs_samples: list[float] = []
+
+    for step in range(1, MAX_STEPS + 1):
+        apply_pd(model, data, target_qpos, kp=KP, kd=KD, roll_damped=False)
+        ctrl_base = np.array(data.ctrl, copy=True)
+        apply_pd(model, data, target_qpos, kp=KP, kd=KD, roll_damped=True)
+        ctrl_rd = np.array(data.ctrl, copy=True)
+        delta = ctrl_rd - ctrl_base
+        roll = body_roll(data.qpos)
+        rate = float(data.qvel[3])
+
+        apply_torso_impulse(data, torso_body_id, step, DEBUG_DELTA_FORCE)
+        mujoco.mj_step(model, data)
+
+        if DEBUG_DELTA_START <= step <= DEBUG_DELTA_END:
+            n_window += 1
+            hip_delta = delta[hip_ids]
+            abs_max_step = float(np.max(np.abs(hip_delta)))
+            abs_samples.append(abs_max_step)
+            if abs_max_step > max_abs:
+                max_abs = abs_max_step
+                named = {
+                    name: float(delta[act_id])
+                    for name, act_id in zip(HIP_ACTUATOR_NAMES, hip_ids)
+                }
+                left_mean = float(np.mean([delta[i] for i in LEFT_HIP_IDX]))
+                right_mean = float(np.mean([delta[i] for i in RIGHT_HIP_IDX]))
+                hip_sum = float(np.sum(hip_delta))
+                max_info = {
+                    "step": step,
+                    "roll": roll,
+                    "qvel3": rate,
+                    "named": named,
+                    "left_mean": left_mean,
+                    "right_mean": right_mean,
+                    "hip_sum": hip_sum,
+                    "same_sign": (
+                        abs(left_mean) < 1e-12
+                        or abs(right_mean) < 1e-12
+                        or left_mean * right_mean > 0.0
+                    ),
+                    "damps": hip_sum * rate > 0.0 if abs(rate) > 1e-9 else None,
+                }
+
+        if float(data.qpos[2]) < FALL_HEIGHT:
+            print(f"  эпизод отладки упал на шаге {step}, окно обрезано")
+            break
+
+    print(
+        f"  μ={DEBUG_DELTA_FRICTION:g} Fy={DEBUG_DELTA_FORCE:g} Н, "
+        f"шаги {DEBUG_DELTA_START}..{DEBUG_DELTA_END} (n={n_window})"
+    )
+    if max_info is None:
+        print("  нет шагов в окне 450..550")
+        return
+    print(
+        f"  max |Δctrl| hip={max_abs:.4f} Н·м  "
+        f"(mean по окну {float(np.mean(abs_samples)):.4f})"
+    )
+    named_s = ", ".join(f"{k}={v:+.4f}" for k, v in max_info["named"].items())
+    print(
+        f"  на шаге {max_info['step']}: roll={max_info['roll']:+.4f}  "
+        f"qvel[3]={max_info['qvel3']:+.4f}  Δctrl {named_s}"
+    )
+    print(
+        f"  mean Δ left={max_info['left_mean']:+.4f}  "
+        f"mean Δ right={max_info['right_mean']:+.4f}  "
+        f"sum Δ hips={max_info['hip_sum']:+.4f}  "
+        f"left/right один знак={max_info['same_sign']}"
+    )
+    print(
+        f"  для сравнения: старое left-=u / right+=u давало sum Δ hips=0 "
+        f"(дифференциал, не момент крена); сейчас sum={max_info['hip_sum']:+.4f}"
+    )
+    if max_abs < 1e-6:
+        print("  предупреждение: поправка ≈ 0, до моторов не доходит")
+    elif not max_info["same_sign"]:
+        print("  предупреждение: левая и правая поправки противоположны, момент крена гасится")
+    elif max_info["damps"] is False:
+        print("  предупреждение: sum(Δhips) и qvel[3] разных знаков — поправка раскачивает крен")
+    else:
+        print("  поправка доходит до моторов, знак left=right, sum(Δ) совпадает с qvel[3] (гашение)")
 
 
 def snapshot(step: int, data: mujoco.MjData, z: float) -> dict:
@@ -459,6 +609,10 @@ def main() -> None:
         raise RuntimeError(
             f"число актуаторов ({model.nu}) не совпадает с числом суставов ({len(target_qpos)})"
         )
+
+    global LEFT_HIP_IDX, RIGHT_HIP_IDX
+    LEFT_HIP_IDX, RIGHT_HIP_IDX = resolve_hip_actuators(model)
+    debug_roll_ctrl_delta(model, data, target_qpos, friction_geoms, torso_body_id)
 
     probe_friction_effect(model, data, target_qpos, friction_geoms, torso_body_id)
 
