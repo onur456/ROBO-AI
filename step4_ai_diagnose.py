@@ -1,90 +1,60 @@
 import json
 import os
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 
 FAILURES_PATH = Path("reports") / "batch_failures.json"
-REPORT_PATH = Path("reports") / "diagnosis_summary.txt"
+REPORT_PATH = Path("reports") / "final_diagnosis.md"
 GEMINI_MODEL = "gemini-2.0-flash"
 
+ROLL_RATE_THRESHOLD = 2.5
+SLIP_FRICTION_THRESHOLD = 0.15
 
-def _stats(values: list[float]) -> dict:
-    if not values:
-        return {"mean": None, "max": None, "min": None, "count": 0}
-    arr = np.asarray(values, dtype=float)
-    return {
-        "mean": float(arr.mean()),
-        "max": float(arr.max()),
-        "min": float(arr.min()),
-        "count": int(arr.size),
-    }
+CAT_OVERTURN = "Опрокидывание от бокового импульса"
+CAT_SLIP = "Разъезжание лап на скользкой поверхности"
+CAT_OTHER = "Прочее / смешанный сбой"
 
 
-def _fmt_stats(stats: dict, ndigits: int = 4) -> str:
-    if not stats["count"]:
-        return "нет данных"
-    return (
-        f"среднее={stats['mean']:.{ndigits}f}, "
-        f"макс={stats['max']:.{ndigits}f}, "
-        f"мин={stats['min']:.{ndigits}f}"
-    )
+def get_api_key() -> str | None:
+    return os.environ.get("GEMINI_API_KEY") or None
 
 
-def _fmt_vec(values, ndigits: int = 3) -> str:
-    arr = np.asarray(values, dtype=float)
-    return "[" + ", ".join(f"{x:.{ndigits}f}" for x in arr) + "]"
-
-
-def window_digest(window: list[dict]) -> dict:
+def window_metrics(window: list[dict]) -> dict:
     if not window:
         return {
-            "n_samples": 0,
+            "max_abs_roll_rate": 0.0,
+            "max_body_speed": 0.0,
             "z_first": None,
             "z_last": None,
-            "z_drop": None,
-            "qvel_first": [],
-            "qvel_last": [],
-            "ctrl_first": [],
-            "ctrl_last": [],
-            "max_z_deviation": None,
-            "max_qvel_norm": None,
-            "max_abs_qvel": None,
-            "max_abs_ctrl": None,
         }
-
-    z = np.asarray([row["z"] for row in window], dtype=float)
     qvel = np.asarray([row["qvel_head"] for row in window], dtype=float)
-    ctrl = np.asarray([row["ctrl"] for row in window], dtype=float)
-    qvel_norm = np.linalg.norm(qvel, axis=1)
-
+    z = np.asarray([row["z"] for row in window], dtype=float)
+    roll_rate = np.abs(qvel[:, 3])
+    body_speed = np.linalg.norm(qvel[:, :3], axis=1)
     return {
-        "n_samples": len(window),
+        "max_abs_roll_rate": float(np.max(roll_rate)),
+        "max_body_speed": float(np.max(body_speed)),
         "z_first": float(z[0]),
         "z_last": float(z[-1]),
-        "z_drop": float(z[0] - z[-1]),
-        "qvel_first": qvel[0].tolist(),
-        "qvel_last": qvel[-1].tolist(),
-        "ctrl_first": ctrl[0].tolist(),
-        "ctrl_last": ctrl[-1].tolist(),
-        "max_z_deviation": float(np.max(np.abs(z - z[0]))),
-        "max_qvel_norm": float(np.max(qvel_norm)),
-        "max_abs_qvel": float(np.max(np.abs(qvel))),
-        "max_abs_ctrl": float(np.max(np.abs(ctrl))),
     }
 
 
-def summarize_failures(payload: dict) -> dict:
-    failures = payload.get("failures") or []
-    friction = [float(ep["friction"]) for ep in failures]
-    lateral = [float(ep["lateral_vel"]) for ep in failures]
-    fail_step = [int(ep["fail_step"]) for ep in failures]
-    fail_time = [float(ep["fail_time"]) for ep in failures]
-    final_z = [float(ep["final_z"]) for ep in failures]
-    episodes = []
-    for ep in failures:
-        digest = window_digest(ep.get("window") or [])
-        episodes.append(
+def classify_failure(friction: float, max_abs_roll_rate: float) -> str:
+    if max_abs_roll_rate > ROLL_RATE_THRESHOLD:
+        return CAT_OVERTURN
+    if friction < SLIP_FRICTION_THRESHOLD and max_abs_roll_rate <= ROLL_RATE_THRESHOLD:
+        return CAT_SLIP
+    return CAT_OTHER
+
+
+def classify_episodes(payload: dict) -> list[dict]:
+    classified = []
+    for ep in payload.get("failures") or []:
+        metrics = window_metrics(ep.get("window") or [])
+        category = classify_failure(float(ep["friction"]), metrics["max_abs_roll_rate"])
+        classified.append(
             {
                 "episode": ep.get("episode"),
                 "friction": float(ep["friction"]),
@@ -92,99 +62,168 @@ def summarize_failures(payload: dict) -> dict:
                 "fail_step": int(ep["fail_step"]),
                 "fail_time": float(ep["fail_time"]),
                 "final_z": float(ep["final_z"]),
-                "window": digest,
+                "category": category,
+                **metrics,
             }
         )
-    return {
-        "n_episodes": payload.get("n_episodes"),
-        "n_failures": len(failures),
-        "n_survived": payload.get("n_survived"),
-        "failure_rate": payload.get("failure_rate"),
-        "kp": payload.get("kp"),
-        "kd": payload.get("kd"),
-        "friction": _stats(friction),
-        "lateral_vel": _stats(lateral),
-        "fail_step": _stats(fail_step),
-        "fail_time": _stats(fail_time),
-        "final_z": _stats(final_z),
-        "episodes": episodes,
+    return classified
+
+
+def category_stats(episodes: list[dict]) -> list[tuple[str, int, float]]:
+    counts = Counter(ep["category"] for ep in episodes)
+    total = len(episodes)
+    rows = []
+    for name in (CAT_OVERTURN, CAT_SLIP, CAT_OTHER):
+        n = counts.get(name, 0)
+        pct = (100.0 * n / total) if total else 0.0
+        rows.append((name, n, pct))
+    return rows
+
+
+def explain_example(ep: dict) -> str:
+    if ep["category"] == CAT_OVERTURN:
+        return (
+            f"Сильный боковой толчок ({ep['lateral_vel']:+.2f} м/с) раскрутил корпус: "
+            f"макс. |qvel[3]| = {ep['max_abs_roll_rate']:.2f} рад/с (> {ROLL_RATE_THRESHOLD}). "
+            "Суставной PD держит стойку ног, но не гасит крен, поэтому робот опрокидывается."
+        )
+    if ep["category"] == CAT_SLIP:
+        return (
+            f"Трение пола низкое ({ep['friction']:.3f} < {SLIP_FRICTION_THRESHOLD}), "
+            f"крен умеренный (|qvel[3]| = {ep['max_abs_roll_rate']:.2f} рад/с). "
+            "Опоры проскальзывают, ноги разъезжаются, высота корпуса падает без резкого опрокидывания."
+        )
+    return (
+        f"Смешанный случай: friction={ep['friction']:.3f}, "
+        f"толчок {ep['lateral_vel']:+.2f} м/с, "
+        f"|qvel[3]|={ep['max_abs_roll_rate']:.2f} рад/с, "
+        f"скорость корпуса {ep['max_body_speed']:.2f} м/с. "
+        "Одновременно есть и скольжение, и потеря равновесия, одного признака недостаточно."
+    )
+
+
+def pick_examples(episodes: list[dict], limit: int = 3) -> list[dict]:
+    if not episodes:
+        return []
+    by_cat: dict[str, list[dict]] = {CAT_OVERTURN: [], CAT_SLIP: [], CAT_OTHER: []}
+    for ep in episodes:
+        by_cat[ep["category"]].append(ep)
+
+    scored = {
+        CAT_OVERTURN: sorted(
+            by_cat[CAT_OVERTURN],
+            key=lambda ep: (ep["max_abs_roll_rate"], abs(ep["lateral_vel"])),
+            reverse=True,
+        ),
+        CAT_SLIP: sorted(
+            by_cat[CAT_SLIP],
+            key=lambda ep: (ep["friction"], -ep["max_body_speed"]),
+        ),
+        CAT_OTHER: sorted(
+            by_cat[CAT_OTHER],
+            key=lambda ep: (abs(ep["lateral_vel"]), ep["max_body_speed"]),
+            reverse=True,
+        ),
     }
 
+    picked: list[dict] = []
+    for name in (CAT_OVERTURN, CAT_SLIP, CAT_OTHER):
+        if scored[name] and len(picked) < limit:
+            picked.append(scored[name][0])
+    if len(picked) < limit:
+        rest = sorted(
+            episodes,
+            key=lambda ep: (ep["max_abs_roll_rate"], abs(ep["lateral_vel"])),
+            reverse=True,
+        )
+        for ep in rest:
+            if ep not in picked:
+                picked.append(ep)
+            if len(picked) >= limit:
+                break
+    return picked[:limit]
 
-def build_report(summary: dict) -> str:
-    lines = [
-        "Диагностика сбоев Unitree Go2 (PD-стойка + стресс трения/бокового толчка).",
-        "",
-        "Общая сводка",
-        f"- всего эпизодов в батче: {summary['n_episodes']}",
-        f"- сбойных эпизодов: {summary['n_failures']}",
-        f"- устояли: {summary['n_survived']}",
-        f"- доля сбоев: {None if summary['failure_rate'] is None else round(summary['failure_rate'] * 100, 1)}%",
-        f"- PD: kp={summary['kp']}, kd={summary['kd']}",
-        f"- трение у сбоев: {_fmt_stats(summary['friction'])}",
-        f"- боковая скорость у сбоев: {_fmt_stats(summary['lateral_vel'])}",
-        f"- шаг сбоя: {_fmt_stats(summary['fail_step'], ndigits=1)}",
-        f"- время сбоя, с: {_fmt_stats(summary['fail_time'])}",
-        f"- финальный z: {_fmt_stats(summary['final_z'])}",
-        "",
-        "Выжимка телеметрии по каждому сбою (окно до падения)",
+
+def controller_recommendations(stats: list[tuple[str, int, float]]) -> list[str]:
+    _ = stats
+    return [
+        "Добавить контур по ориентации корпуса (PD по крену/тангажу), а не только по углам суставов: текущий регулятор не видит ω корпуса.",
+        "При большом |qvel[3]| расширять опору (hip abduction) и гасить крен, не увеличивая kp ног вслепую.",
+        "На низком трении ограничивать горизонтальную силу стоп и снижать kp: жёсткая стойка на льду разгоняет проскальзывание.",
+        "Оценивать скольжение по росту скорости корпуса без роста крена и переключать режим: мягче на скользком, жёстче при ударе; в коленях добавить компенсацию тяжести.",
     ]
 
-    if not summary["episodes"]:
-        lines.append("- сбойных эпизодов нет.")
+
+def build_markdown(payload: dict, episodes: list[dict]) -> str:
+    n_fail = len(episodes)
+    n_all = payload.get("n_episodes")
+    n_survived = payload.get("n_survived")
+    rate = payload.get("failure_rate")
+    stats = category_stats(episodes)
+    examples = pick_examples(episodes)
+    recs = controller_recommendations(stats)
+
+    lines = [
+        "# Диагностика сбоев Go2",
+        "",
+        "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, стресс — трение пола и боковой толчок.",
+        "",
+        "## Общая статистика",
+        "",
+        f"- всего прогонов: {n_all}",
+        f"- сбоев: {n_fail}" + (f" ({rate * 100:.1f}%)" if isinstance(rate, (int, float)) else ""),
+        f"- устояли: {n_survived}",
+        f"- PD: kp={payload.get('kp')}, kd={payload.get('kd')}",
+        "",
+        "## Категории сбоев",
+        "",
+        f"Правила: опрокидывание при макс. |qvel[3]| > {ROLL_RATE_THRESHOLD} рад/с; "
+        f"разъезжание при трении < {SLIP_FRICTION_THRESHOLD} и |qvel[3]| ≤ {ROLL_RATE_THRESHOLD}; иначе смешанный случай.",
+        "",
+    ]
+    if n_fail == 0:
+        lines.append("Сбойных эпизодов нет.")
+        return "\n".join(lines) + "\n"
+
+    for name, n, pct in stats:
+        lines.append(f"- **{name}**: {n} шт. ({pct:.1f}% от сбоев)")
+    lines += ["", "## Показательные примеры", ""]
+
+    if not examples:
+        lines.append("Примеров нет.")
     else:
-        for ep in summary["episodes"]:
-            win = ep["window"]
-            lines.extend(
-                [
-                    (
-                        f"- эпизод {ep['episode']}: friction={ep['friction']:.4f}, "
-                        f"lateral_vel={ep['lateral_vel']:.4f} м/с, "
-                        f"сбой на шаге {ep['fail_step']} (t={ep['fail_time']:.4f} с), "
-                        f"final_z={ep['final_z']:.4f}"
-                    ),
-                    (
-                        f"  окно {win['n_samples']} отсчётов: "
-                        f"z {win['z_first']:.4f} → {win['z_last']:.4f} "
-                        f"(падение {win['z_drop']:.4f}, "
-                        f"макс. отклонение z {win['max_z_deviation']:.4f})"
-                    ),
-                    (
-                        f"  qvel: {_fmt_vec(win['qvel_first'])} → {_fmt_vec(win['qvel_last'])}; "
-                        f"макс. |qvel|={win['max_abs_qvel']:.3f}, "
-                        f"макс. ||qvel||={win['max_qvel_norm']:.3f}"
-                    ),
-                    (
-                        f"  ctrl: {_fmt_vec(win['ctrl_first'])} → {_fmt_vec(win['ctrl_last'])}; "
-                        f"макс. |ctrl|={win['max_abs_ctrl']:.3f}"
-                    ),
-                ]
-            )
+        for i, ep in enumerate(examples, start=1):
+            lines += [
+                f"### Пример {i}. Эпизод {ep['episode']} — {ep['category']}",
+                "",
+                f"- трение: {ep['friction']:.3f}",
+                f"- боковой толчок: {ep['lateral_vel']:+.3f} м/с",
+                f"- сбой: шаг {ep['fail_step']}, t={ep['fail_time']:.3f} с, z={ep['final_z']:.3f}",
+                f"- макс. |qvel[3]| (крен): {ep['max_abs_roll_rate']:.3f} рад/с",
+                f"- макс. скорость корпуса: {ep['max_body_speed']:.3f} м/с",
+                f"- высота в окне: {ep['z_first']:.3f} → {ep['z_last']:.3f}",
+                "",
+                explain_example(ep),
+                "",
+            ]
 
-    lines.extend(
-        [
-            "",
-            "Задача для анализа",
-            "По этим метрикам кратко объясни вероятную причину падений Go2.",
-            "Отдели случаи низкого трения от сильного бокового импульса, если паттерн виден.",
-            "Дай 3–5 конкретных гипотез и что проверить дальше (контроллер, контакты, диапазон параметров).",
-            "Пиши по-русски, коротко и по делу.",
-        ]
-    )
-    return "\n".join(lines) + "\n"
+    lines += ["## Рекомендации для контроллера", ""]
+    for rec in recs:
+        lines.append(f"- {rec}")
+    lines.append("")
+    return "\n".join(lines)
 
 
-def get_api_key() -> str | None:
-    for name in ("GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_API_KEY"):
-        value = os.environ.get(name)
-        if value:
-            return value
-    return None
-
-
-def ask_gemini(prompt: str, api_key: str) -> str:
+def ask_gemini(report: str, api_key: str) -> str:
     from google import genai
 
+    prompt = (
+        "Ниже готовый отчёт по падениям квадропода Go2. "
+        "Сделай углублённый разбор на русском: подтверди или поправь категории, "
+        "укажи, чего не хватает простому PD, и дай ещё 3 практичных шага для контроллера. "
+        "Пиши коротко.\n\n"
+        + report
+    )
     client = genai.Client(api_key=api_key)
     response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
     text = getattr(response, "text", None)
@@ -195,33 +234,28 @@ def ask_gemini(prompt: str, api_key: str) -> str:
 
 def main() -> None:
     if not FAILURES_PATH.exists():
-        raise FileNotFoundError(f"нет файла {FAILURES_PATH}, сначала запусти step3_batch_stress.py")
+        raise FileNotFoundError(
+            f"нет файла {FAILURES_PATH}, сначала запусти step3_batch_stress.py"
+        )
 
     payload = json.loads(FAILURES_PATH.read_text(encoding="utf-8"))
-    summary = summarize_failures(payload)
-    report = build_report(summary)
+    episodes = classify_episodes(payload)
+    report = build_markdown(payload, episodes)
 
     print(report.rstrip())
-
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
     api_key = get_api_key()
-    if not api_key:
-        REPORT_PATH.write_text(report, encoding="utf-8")
-        print(f"\nAPI-ключ не задан, отчёт/промпт сохранён: {REPORT_PATH}")
-        return
+    if api_key:
+        try:
+            extra = ask_gemini(report, api_key)
+            report = report + "\n## Углублённый разбор Gemini\n\n" + extra + "\n"
+            print("\n## Углублённый разбор Gemini\n")
+            print(extra)
+        except Exception as exc:
+            print(f"\nGemini недоступен ({type(exc).__name__}: {exc}). Сохранён локальный отчёт.")
 
-    try:
-        diagnosis = ask_gemini(report, api_key)
-    except Exception as exc:
-        fallback = report + "\n\n# Gemini недоступен\n" + f"{type(exc).__name__}: {exc}\n"
-        REPORT_PATH.write_text(fallback, encoding="utf-8")
-        print(f"\nGemini недоступен ({exc}). Промпт сохранён: {REPORT_PATH}")
-        return
-
-    output = report + "\n\n# Ответ Gemini\n" + diagnosis + "\n"
-    REPORT_PATH.write_text(output, encoding="utf-8")
-    print("\n# Ответ Gemini")
-    print(diagnosis)
+    REPORT_PATH.write_text(report, encoding="utf-8")
     print(f"\nотчёт сохранён: {REPORT_PATH}")
 
 
