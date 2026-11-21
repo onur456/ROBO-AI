@@ -132,7 +132,10 @@ def reset_to_stance(model: mujoco.MjModel, data: mujoco.MjData) -> None:
 def apply_pd(model: mujoco.MjModel, data: mujoco.MjData, target_qpos: np.ndarray) -> None:
     if model.nu != len(target_qpos):
         return
-    data.ctrl[:] = KP * (target_qpos - data.qpos[7:]) - KD * data.qvel[6:]
+    mujoco.mj_forward(model, data)
+    pd = KP * (target_qpos - data.qpos[7:]) - KD * data.qvel[6:]
+    grav_comp = np.asarray(data.qfrc_bias[6 : 6 + model.nu], dtype=float)
+    data.ctrl[:] = pd + grav_comp
 
 
 def snapshot(step: int, data: mujoco.MjData, z: float) -> dict:
@@ -286,7 +289,8 @@ def probe_stance_hold(
     status = "упал" if result["fail_step"] is not None else "устоял"
     print(
         f"контроль стойки: z_start={result['z_start']:.4f} "
-        f"z_end={result['z_end']:.4f} {status}"
+        f"z_end={result['z_end']:.4f} {status} "
+        f"(было z_end=0.2069 без компенсации)"
     )
 
 
