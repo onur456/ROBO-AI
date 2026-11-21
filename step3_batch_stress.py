@@ -211,12 +211,13 @@ def apply_pd(
     roll_sign: float = 1.0,
     k_roll_p: float | None = None,
     k_roll_d: float | None = None,
-) -> None:
+) -> tuple[float, float]:
     if model.nu != len(target_qpos):
-        return
+        return 0.0, 0.0
     data.ctrl[:] = kp * (target_qpos - data.qpos[7:]) - kd * data.qvel[6:]
     if not roll_damped:
-        return
+        return 0.0, 0.0
+    ctrl_pd = np.array(data.ctrl, copy=True)
     roll = body_roll(data.qpos)
     roll_rate = float(data.qvel[3])
     # roll_sign=+1: +u на всех abduction → −τ_roll на torso (гашение).
@@ -238,6 +239,11 @@ def apply_pd(
         model.actuator_ctrlrange[:, 1],
         out=data.ctrl,
     )
+    delta = np.asarray(data.ctrl) - ctrl_pd
+    hip_ids = (*LEFT_HIP_IDX, *RIGHT_HIP_IDX)
+    mean_abs = float(np.mean(np.abs(delta)))
+    mean_abs_hip = float(np.mean(np.abs(delta[list(hip_ids)])))
+    return mean_abs, mean_abs_hip
 
 
 def debug_roll_ctrl_delta(
@@ -562,6 +568,8 @@ def run_stress_batch(
     failed_force: list[float] = []
     survived_friction: list[float] = []
     survived_force: list[float] = []
+    episode_mean_abs: list[float] = []
+    episode_mean_abs_hip: list[float] = []
 
     for episode, (friction, lateral_force) in enumerate(specs, start=1):
         reset_to_stance(model, data)
@@ -570,6 +578,8 @@ def run_stress_batch(
 
         window: deque[dict] | None = deque(maxlen=WINDOW_SIZE) if keep_windows else None
         episode_failed = False
+        step_abs: list[float] = []
+        step_abs_hip: list[float] = []
         params = {
             "episode": episode,
             "friction": friction,
@@ -587,7 +597,7 @@ def run_stress_batch(
         }
 
         for step in range(1, MAX_STEPS + 1):
-            apply_pd(
+            mean_abs, mean_abs_hip = apply_pd(
                 model,
                 data,
                 target_qpos,
@@ -598,6 +608,8 @@ def run_stress_batch(
                 k_roll_p=k_roll_p,
                 k_roll_d=k_roll_d,
             )
+            step_abs.append(mean_abs)
+            step_abs_hip.append(mean_abs_hip)
             apply_torso_impulse(data, torso_body_id, step, lateral_force)
             mujoco.mj_step(model, data)
             z = float(data.qpos[2])
@@ -619,6 +631,10 @@ def run_stress_batch(
                 failed_force.append(lateral_force)
                 episode_failed = True
                 break
+
+        if step_abs:
+            episode_mean_abs.append(float(np.mean(step_abs)))
+            episode_mean_abs_hip.append(float(np.mean(step_abs_hip)))
 
         if not episode_failed:
             survived_friction.append(friction)
@@ -646,6 +662,11 @@ def run_stress_batch(
         "failed_force": failed_force,
         "survived_friction": survived_friction,
         "survived_force": survived_force,
+        "mean_abs_dctrl": float(np.mean(episode_mean_abs)) if episode_mean_abs else 0.0,
+        "mean_abs_dctrl_hip": (
+            float(np.mean(episode_mean_abs_hip)) if episode_mean_abs_hip else 0.0
+        ),
+        "n_episodes_ctrl": len(episode_mean_abs),
     }
 
 
@@ -734,8 +755,16 @@ def main() -> None:
             f"сбои={batch['failure_rate'] * 100:.1f}% "
             f"({batch['n_failures']}/{batch['n_episodes']})  "
             f"до шага {IMPULSE_START}: {batch['n_before_impact']}  "
-            f"при/после {IMPULSE_START}: {batch['n_at_or_after_impact']}"
+            f"при/после {IMPULSE_START}: {batch['n_at_or_after_impact']}  "
+            f"mean|Δctrl|={batch['mean_abs_dctrl']:.4f}  "
+            f"hip={batch['mean_abs_dctrl_hip']:.4f}  "
+            f"(n={batch['n_episodes_ctrl']})"
         )
+        if roll_damped and batch["mean_abs_dctrl_hip"] < 1e-9:
+            print(
+                f"  предупреждение: {name} в батче дал mean|Δctrl|_hip≈0, "
+                "поправка не попала в ctrl цикла прогона"
+            )
         if keep_windows:
             main_batch = batch
 
