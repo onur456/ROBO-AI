@@ -1,6 +1,6 @@
 import json
 import os
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 
 import numpy as np
@@ -102,45 +102,69 @@ def explain_example(ep: dict) -> str:
     )
 
 
-def pick_examples(episodes: list[dict], limit: int = 3) -> list[dict]:
-    if not episodes:
-        return []
-    by_cat: dict[str, list[dict]] = {CAT_OVERTURN: [], CAT_SLIP: [], CAT_OTHER: []}
-    for ep in episodes:
-        by_cat[ep["category"]].append(ep)
-
-    scored = {
-        CAT_OVERTURN: sorted(
-            by_cat[CAT_OVERTURN],
-            key=lambda ep: (ep["max_abs_roll_rate"], abs(ep["lateral_vel"])),
-            reverse=True,
-        ),
-        CAT_SLIP: sorted(
-            by_cat[CAT_SLIP],
-            key=lambda ep: (ep["friction"], -ep["max_body_speed"]),
-        ),
-        CAT_OTHER: sorted(
-            by_cat[CAT_OTHER],
-            key=lambda ep: (abs(ep["lateral_vel"]), ep["max_body_speed"]),
-            reverse=True,
-        ),
-    }
-
-    picked: list[dict] = []
-    for name in (CAT_OVERTURN, CAT_SLIP, CAT_OTHER):
-        if scored[name] and len(picked) < limit:
-            picked.append(scored[name][0])
-    if len(picked) < limit:
-        rest = sorted(
-            episodes,
+def _sort_category(name: str, items: list[dict]) -> list[dict]:
+    if name == CAT_OVERTURN:
+        return sorted(
+            items,
             key=lambda ep: (ep["max_abs_roll_rate"], abs(ep["lateral_vel"])),
             reverse=True,
         )
-        for ep in rest:
-            if ep not in picked:
-                picked.append(ep)
-            if len(picked) >= limit:
+    if name == CAT_SLIP:
+        return sorted(items, key=lambda ep: (ep["friction"], -ep["max_body_speed"]))
+    return sorted(
+        items,
+        key=lambda ep: (abs(ep["lateral_vel"]), ep["max_body_speed"]),
+        reverse=True,
+    )
+
+
+def pick_examples(episodes: list[dict], limit: int = 3) -> list[dict]:
+    if not episodes:
+        return []
+
+    queues: dict[str, deque[dict]] = {}
+    for name in (CAT_OVERTURN, CAT_SLIP, CAT_OTHER):
+        items = [ep for ep in episodes if ep["category"] == name]
+        if items:
+            queues[name] = deque(_sort_category(name, items))
+    category_order = list(queues)
+
+    picked: list[dict] = []
+    used_ids: set = set()
+
+    def take(name: str) -> dict | None:
+        queue = queues.get(name)
+        if not queue:
+            return None
+        while queue:
+            ep = queue.popleft()
+            ep_id = ep.get("episode")
+            if ep_id in used_ids:
+                continue
+            used_ids.add(ep_id)
+            return ep
+        return None
+
+    for name in category_order:
+        if len(picked) >= limit:
+            break
+        example = take(name)
+        if example is not None:
+            picked.append(example)
+
+    while len(picked) < limit:
+        last_cat = picked[-1]["category"] if picked else None
+        preferred = [name for name in category_order if name != last_cat]
+        fallback = [name for name in category_order if name == last_cat]
+        example = None
+        for name in preferred + fallback:
+            example = take(name)
+            if example is not None:
                 break
+        if example is None:
+            break
+        picked.append(example)
+
     return picked[:limit]
 
 
