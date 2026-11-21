@@ -157,15 +157,49 @@ def classify_episodes(payload: dict) -> list[dict]:
     return classified
 
 
-def category_stats(episodes: list[dict]) -> list[tuple[str, int, float]]:
+def is_before_impact(ep: dict) -> bool:
+    if ep.get("impact_phase") == PHASE_BEFORE:
+        return True
+    if ep.get("impact_phase") in {PHASE_DURING, PHASE_AFTER}:
+        return False
+    start = _as_int(ep.get("impulse_start"), DEFAULT_IMPULSE_START)
+    return _as_int(ep.get("fail_step")) < start
+
+
+def category_stats(episodes: list[dict]) -> list[tuple[str, int, int, float]]:
     counts = Counter(ep["category"] for ep in episodes)
+    before = Counter(ep["category"] for ep in episodes if is_before_impact(ep))
     total = len(episodes)
     rows = []
     for name in (CAT_OVERTURN, CAT_SLIP, CAT_OTHER):
         n = counts.get(name, 0)
+        n_before = before.get(name, 0)
         pct = (100.0 * n / total) if total else 0.0
-        rows.append((name, n, pct))
+        rows.append((name, n, n_before, pct))
     return rows
+
+
+def impact_window_stats(payload: dict, episodes: list[dict]) -> dict:
+    start = _as_int(payload.get("impulse_start"), DEFAULT_IMPULSE_START)
+    n_all = payload.get("n_episodes")
+    n_survived = payload.get("n_survived")
+    n_before = sum(1 for ep in episodes if is_before_impact(ep))
+    n_at_or_after = len(episodes) - n_before
+    if isinstance(n_survived, (int, float)):
+        n_reached = int(n_survived) + n_at_or_after
+    elif isinstance(n_all, (int, float)):
+        n_reached = max(0, int(n_all) - n_before)
+    else:
+        n_reached = n_at_or_after
+    share = (n_at_or_after / n_reached) if n_reached else 0.0
+    return {
+        "impulse_start": start,
+        "n_before": n_before,
+        "n_at_or_after": n_at_or_after,
+        "n_reached": n_reached,
+        "n_survived": n_survived,
+        "share_among_reached": share,
+    }
 
 
 def phase_stats(episodes: list[dict]) -> list[tuple[str, str, int, float]]:
@@ -289,6 +323,7 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
     rate = payload.get("failure_rate")
     stats = category_stats(episodes)
     phases = phase_stats(episodes)
+    impact = impact_window_stats(payload, episodes)
     examples = pick_examples(episodes)
     recs = controller_recommendations(stats)
 
@@ -316,9 +351,32 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
         lines.append("Сбойных эпизодов нет.")
         return "\n".join(lines) + "\n"
 
-    for name, n, pct in stats:
-        lines.append(f"- **{name}**: {n} шт. ({pct:.1f}% от сбоев)")
-    lines += ["", "## Разбивка сбоев по фазам удара", ""]
+    for name, n, n_before, pct in stats:
+        before_note = (
+            f", из них до удара (`before_impact`): {n_before}"
+            " — самопроизвольное падение на старте/стойке, не следствие Fy"
+            if n_before
+            else ", из них до удара: 0"
+        )
+        lines.append(f"- **{name}**: {n} шт. ({pct:.1f}% от сбоев){before_note}")
+    lines += [
+        "",
+        "## Сбои при/после удара (шаг ≥ 450)",
+        "",
+        f"- эпизодов, не упавших до {impact['impulse_start']}-го шага: {impact['n_reached']}",
+        f"- сбоев при/после удара (`during_impact` + `after_impact`): {impact['n_at_or_after']}",
+        (
+            f"- доля сбоев среди дошедших до окна удара: "
+            f"{impact['share_among_reached'] * 100:.1f}%"
+        ),
+        (
+            f"- сбоев до включения Fy (`before_impact`): {impact['n_before']} "
+            "— их нельзя относить к последствию боковой силы"
+        ),
+        "",
+        "## Разбивка сбоев по фазам удара",
+        "",
+    ]
     for phase, label, n, pct in phases:
         extra = ""
         if phase == PHASE_BEFORE and n:
