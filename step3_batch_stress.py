@@ -12,20 +12,87 @@ WINDOW_SIZE = 200
 FALL_HEIGHT = 0.20
 FRICTION_RANGE = (0.05, 1.0)
 LATERAL_VEL_RANGE = (-1.8, 1.8)
+PROBE_FRICTIONS = (0.05, 1.0)
+PROBE_LATERAL_VEL = 0.8
 KP = 25.0
 KD = 1.5
 REPORT_PATH = Path("reports") / "batch_failures.json"
 
+GEOM_TYPE_NAMES = {
+    int(mujoco.mjtGeom.mjGEOM_PLANE): "plane",
+    int(mujoco.mjtGeom.mjGEOM_HFIELD): "hfield",
+    int(mujoco.mjtGeom.mjGEOM_SPHERE): "sphere",
+    int(mujoco.mjtGeom.mjGEOM_CAPSULE): "capsule",
+    int(mujoco.mjtGeom.mjGEOM_ELLIPSOID): "ellipsoid",
+    int(mujoco.mjtGeom.mjGEOM_CYLINDER): "cylinder",
+    int(mujoco.mjtGeom.mjGEOM_BOX): "box",
+    int(mujoco.mjtGeom.mjGEOM_MESH): "mesh",
+}
+
+
+def geom_name(model: mujoco.MjModel, geom_id: int) -> str:
+    return mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or ""
+
+
+def geom_type_name(model: mujoco.MjModel, geom_id: int) -> str:
+    type_id = int(model.geom_type[geom_id])
+    return GEOM_TYPE_NAMES.get(type_id, str(type_id))
+
 
 def find_floor_geom_id(model: mujoco.MjModel) -> int:
     for geom_id in range(model.ngeom):
-        name = (mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, geom_id) or "").lower()
-        if name in {"floor", "ground", "groundplane"}:
+        if geom_name(model, geom_id).lower() in {"floor", "ground", "groundplane"}:
             return geom_id
     for geom_id in range(model.ngeom):
         if int(model.geom_type[geom_id]) == int(mujoco.mjtGeom.mjGEOM_PLANE):
             return geom_id
     return 0
+
+
+def find_foot_geom_ids(model: mujoco.MjModel) -> list[int]:
+    ids: list[int] = []
+    for name in ("FL", "FR", "RL", "RR"):
+        geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+        if geom_id >= 0:
+            ids.append(int(geom_id))
+    if ids:
+        return ids
+    return [
+        geom_id
+        for geom_id in range(model.ngeom)
+        if int(model.geom_priority[geom_id]) > 0
+    ]
+
+
+def set_sliding_friction(model: mujoco.MjModel, geom_ids: list[int], friction: float) -> None:
+    for geom_id in geom_ids:
+        model.geom_friction[geom_id, 0] = friction
+        actual = float(model.geom_friction[geom_id, 0])
+        if abs(actual - friction) > 1e-12:
+            raise RuntimeError(
+                f"не удалось записать geom_friction[{geom_id}, 0]={friction}, сейчас {actual}"
+            )
+
+
+def print_floor_selection(
+    model: mujoco.MjModel, floor_id: int, foot_ids: list[int]
+) -> None:
+    print("геометрия пола:")
+    print(f"  index={floor_id}")
+    print(f"  name={geom_name(model, floor_id)!r}")
+    print(f"  type={geom_type_name(model, floor_id)}")
+    print(f"  priority={int(model.geom_priority[floor_id])}")
+    print(f"  condim={int(model.geom_condim[floor_id])}")
+    print(f"  geom_friction.shape={tuple(model.geom_friction.shape)}")
+    print(f"  geom_friction[{floor_id}]={model.geom_friction[floor_id].tolist()}")
+    print("контактные geom лап (выше priority, от них MuJoCo берёт friction контакта):")
+    for geom_id in foot_ids:
+        print(
+            f"  id={geom_id} name={geom_name(model, geom_id)!r} "
+            f"type={geom_type_name(model, geom_id)} "
+            f"priority={int(model.geom_priority[geom_id])} "
+            f"friction={model.geom_friction[geom_id].tolist()}"
+        )
 
 
 def reset_to_stance(model: mujoco.MjModel, data: mujoco.MjData) -> None:
@@ -72,10 +139,103 @@ def format_stats(stats: dict) -> str:
     )
 
 
+def run_controlled_episode(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    friction: float,
+    lateral_vel: float,
+) -> dict:
+    reset_to_stance(model, data)
+    set_sliding_friction(model, friction_geoms, friction)
+    data.qvel[1] = lateral_vel
+    mujoco.mj_forward(model, data)
+
+    contact_friction = None
+    if data.ncon > 0:
+        contact_friction = np.asarray(data.contact[0].friction, dtype=float).tolist()
+
+    zs: list[float] = []
+    ys: list[float] = []
+    fail_step = None
+    for step in range(1, MAX_STEPS + 1):
+        apply_pd(model, data, target_qpos)
+        mujoco.mj_step(model, data)
+        z = float(data.qpos[2])
+        zs.append(z)
+        ys.append(float(data.qpos[1]))
+        if z < FALL_HEIGHT:
+            fail_step = step
+            break
+
+    written = {
+        geom_id: float(model.geom_friction[geom_id, 0]) for geom_id in friction_geoms
+    }
+    return {
+        "friction": friction,
+        "lateral_vel": lateral_vel,
+        "written_sliding": written,
+        "contact_friction": contact_friction,
+        "fail_step": fail_step,
+        "n_steps": len(zs),
+        "z_end": zs[-1],
+        "z_min": min(zs),
+        "y_end": ys[-1],
+        "max_abs_y": max(abs(y) for y in ys),
+        "z": zs,
+        "y": ys,
+    }
+
+
+def probe_friction_effect(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+) -> None:
+    print(
+        f"\nпроверка трения: vy={PROBE_LATERAL_VEL} м/с, "
+        f"friction={list(PROBE_FRICTIONS)}"
+    )
+    results = [
+        run_controlled_episode(
+            model, data, target_qpos, friction_geoms, mu, PROBE_LATERAL_VEL
+        )
+        for mu in PROBE_FRICTIONS
+    ]
+    for result in results:
+        status = (
+            f"упал на шаге {result['fail_step']}"
+            if result["fail_step"] is not None
+            else "устоял"
+        )
+        print(
+            f"  mu={result['friction']:.2f}: записано {result['written_sliding']}, "
+            f"contact.friction={result['contact_friction']}, {status}, "
+            f"z_end={result['z_end']:.4f}, z_min={result['z_min']:.4f}, "
+            f"y_end={result['y_end']:.4f}, max|y|={result['max_abs_y']:.4f}"
+        )
+
+    z0, z1 = np.asarray(results[0]["z"]), np.asarray(results[1]["z"])
+    y0, y1 = np.asarray(results[0]["y"]), np.asarray(results[1]["y"])
+    n = min(len(z0), len(z1))
+    z_diff = float(np.max(np.abs(z0[:n] - z1[:n])))
+    y_diff = float(np.max(np.abs(y0[:n] - y1[:n])))
+    print(f"  max |Δz|={z_diff:.6f}, max |Δy|={y_diff:.6f} (по первым {n} шагам)")
+    if z_diff < 1e-9 and y_diff < 1e-9:
+        print("  предупреждение: траектории совпали, трение не влияет на контакт")
+    else:
+        print("  траектории различаются, трение влияет на устойчивость")
+
+
 def main() -> None:
     model = mujoco.MjModel.from_xml_path(MODEL_PATH)
     data = mujoco.MjData(model)
     floor_id = find_floor_geom_id(model)
+    foot_ids = find_foot_geom_ids(model)
+    friction_geoms = [floor_id] + [geom_id for geom_id in foot_ids if geom_id != floor_id]
+    print_floor_selection(model, floor_id, foot_ids)
 
     reset_to_stance(model, data)
     target_qpos = np.array(data.qpos[7:], copy=True)
@@ -83,6 +243,8 @@ def main() -> None:
         raise RuntimeError(
             f"число актуаторов ({model.nu}) не совпадает с числом суставов ({len(target_qpos)})"
         )
+
+    probe_friction_effect(model, data, target_qpos, friction_geoms)
 
     rng = np.random.default_rng()
     failed_episodes: list[dict] = []
@@ -96,7 +258,7 @@ def main() -> None:
 
         friction = float(rng.uniform(*FRICTION_RANGE))
         lateral_vel = float(rng.uniform(*LATERAL_VEL_RANGE))
-        model.geom_friction[floor_id, 0] = friction
+        set_sliding_friction(model, friction_geoms, friction)
         data.qvel[1] = lateral_vel
         mujoco.mj_forward(model, data)
 
@@ -159,6 +321,10 @@ def main() -> None:
         "kp": KP,
         "kd": KD,
         "floor_geom_id": int(floor_id),
+        "floor_geom_name": geom_name(model, floor_id),
+        "floor_geom_type": geom_type_name(model, floor_id),
+        "geom_friction_shape": list(model.geom_friction.shape),
+        "friction_geom_ids": friction_geoms,
         "target_qpos": target_qpos.tolist(),
         "failed": {
             "friction": failed_friction_stats,
