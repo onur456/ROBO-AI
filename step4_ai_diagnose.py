@@ -213,6 +213,35 @@ def phase_stats(episodes: list[dict]) -> list[tuple[str, str, int, float]]:
     return rows
 
 
+def mixed_comment(ep: dict) -> str:
+    """Пояснение без изменения правил классификации: что выглядит преобладающим."""
+    roll = _as_float(ep.get("max_abs_roll_rate"))
+    friction = _as_float(ep.get("friction"))
+    force = abs(_as_float(ep.get("lateral_force")))
+    speed = _as_float(ep.get("max_body_speed"))
+    z_first = ep.get("z_first")
+    z_last = ep.get("z_last")
+    z_drop = 0.0
+    if z_first is not None and z_last is not None:
+        z_drop = float(z_first) - float(z_last)
+    before = is_before_impact(ep)
+    near_overturn = roll >= 1.2 or (force >= 200.0 and roll >= 0.8)
+    sag_like = friction < 0.40 and roll <= 1.2 and (before or z_drop >= 0.03 or speed < 0.35)
+    if sag_like and not near_overturn:
+        return (
+            "Преобладает низкое/среднее трение с просадкой корпуса "
+            "(крен слабый — ближе к разъезжанию, но μ ≥ 0.15, поэтому не отдельная категория)."
+        )
+    if near_overturn:
+        return (
+            "Преобладает боковая сила/крен "
+            "(почти опрокидывание, но |qvel[3]| не превысил порог 2.5 рад/с)."
+        )
+    return (
+        "Смешаны боковой импульс и просадка на среднем трении, явного лидера нет."
+    )
+
+
 def explain_example(ep: dict) -> str:
     push = format_push(ep)
     timing = ep.get("fail_vs_impulse", "")
@@ -235,8 +264,7 @@ def explain_example(ep: dict) -> str:
         f"толчок {push}, "
         f"|qvel[3]|={ep['max_abs_roll_rate']:.2f} рад/с, "
         f"скорость корпуса {ep['max_body_speed']:.2f} м/с. "
-        f"Сбой {timing}. "
-        "Одновременно есть и скольжение, и потеря равновесия, одного признака недостаточно."
+        f"Сбой {timing}. {mixed_comment(ep)}"
     )
 
 
@@ -382,6 +410,24 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
         if phase == PHASE_BEFORE and n:
             extra = " — падение ещё до включения силы Fy"
         lines.append(f"- **{label}** (`{phase}`): {n} шт. ({pct:.1f}% от сбоев){extra}")
+
+    mixed = [ep for ep in episodes if ep["category"] == CAT_OTHER]
+    if mixed:
+        lines += [
+            "",
+            "## Пояснения к смешанным сбоям",
+            "",
+            "Правила классификации не менялись: это эпизоды вне порогов опрокидывания и разъезжания. "
+            "Ниже — краткий комментарий, что в каждом случае выглядит преобладающим.",
+            "",
+        ]
+        for ep in sorted(mixed, key=lambda item: _as_int(item.get("episode"))):
+            lines.append(
+                f"- эпизод {ep.get('episode')}: {format_push(ep)}, "
+                f"μ={ep['friction']:.3f}, |qvel[3]|={ep['max_abs_roll_rate']:.2f} рад/с, "
+                f"{ep.get('fail_vs_impulse', '')}. {mixed_comment(ep)}"
+            )
+
     lines += ["", "## Показательные примеры", ""]
 
     if not examples:
