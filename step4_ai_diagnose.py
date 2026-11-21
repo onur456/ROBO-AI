@@ -11,6 +11,8 @@ GEMINI_MODEL = "gemini-2.0-flash"
 
 ROLL_RATE_THRESHOLD = 2.5
 SLIP_FRICTION_THRESHOLD = 0.15
+DEFAULT_IMPULSE_START = 450
+DEFAULT_IMPULSE_END = 500
 
 CAT_OVERTURN = "Опрокидывание от бокового импульса"
 CAT_SLIP = "Разъезжание лап на скользкой поверхности"
@@ -41,6 +43,60 @@ def window_metrics(window: list[dict]) -> dict:
     }
 
 
+def _as_float(value, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_int(value, default: int = 0) -> int:
+    try:
+        if value is None:
+            return default
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def episode_force(ep: dict) -> float:
+    return _as_float(ep.get("lateral_force", ep.get("fy", ep.get("lateral_vel", 0.0))))
+
+
+def episode_uses_force(ep: dict) -> bool:
+    return ep.get("lateral_force", ep.get("fy")) is not None
+
+
+def impulse_bounds(ep: dict, payload: dict | None = None) -> tuple[int, int]:
+    src = payload or {}
+    start = _as_int(
+        ep.get("impulse_start", src.get("impulse_start", DEFAULT_IMPULSE_START)),
+        DEFAULT_IMPULSE_START,
+    )
+    end = _as_int(
+        ep.get("impulse_end", src.get("impulse_end", DEFAULT_IMPULSE_END)),
+        DEFAULT_IMPULSE_END,
+    )
+    return start, end
+
+
+def fail_vs_impulse(fail_step: int, start: int, end: int) -> str:
+    if fail_step < start:
+        return f"до удара ({start - fail_step} шагов до начала {start}..{end})"
+    if fail_step <= end:
+        return f"во время удара (+{fail_step - start} шагов от начала {start}..{end})"
+    return f"после удара (+{fail_step - end} шагов после конца {start}..{end})"
+
+
+def format_push(ep: dict) -> str:
+    value = _as_float(ep.get("lateral_force"))
+    if ep.get("push_is_force"):
+        return f"{value:+.1f} Н"
+    return f"{value:+.3f} м/с"
+
+
 def classify_failure(friction: float, max_abs_roll_rate: float) -> str:
     if max_abs_roll_rate > ROLL_RATE_THRESHOLD:
         return CAT_OVERTURN
@@ -53,15 +109,24 @@ def classify_episodes(payload: dict) -> list[dict]:
     classified = []
     for ep in payload.get("failures") or []:
         metrics = window_metrics(ep.get("window") or [])
-        category = classify_failure(float(ep["friction"]), metrics["max_abs_roll_rate"])
+        friction = _as_float(ep.get("friction"))
+        force = episode_force(ep)
+        uses_force = episode_uses_force(ep)
+        fail_step = _as_int(ep.get("fail_step"))
+        impulse_start, impulse_end = impulse_bounds(ep, payload)
+        category = classify_failure(friction, metrics["max_abs_roll_rate"])
         classified.append(
             {
                 "episode": ep.get("episode"),
-                "friction": float(ep["friction"]),
-                "lateral_vel": float(ep["lateral_vel"]),
-                "fail_step": int(ep["fail_step"]),
-                "fail_time": float(ep["fail_time"]),
-                "final_z": float(ep["final_z"]),
+                "friction": friction,
+                "lateral_force": force,
+                "push_is_force": uses_force,
+                "fail_step": fail_step,
+                "fail_time": _as_float(ep.get("fail_time")),
+                "final_z": _as_float(ep.get("final_z")),
+                "impulse_start": impulse_start,
+                "impulse_end": impulse_end,
+                "fail_vs_impulse": fail_vs_impulse(fail_step, impulse_start, impulse_end),
                 "category": category,
                 **metrics,
             }
@@ -81,23 +146,28 @@ def category_stats(episodes: list[dict]) -> list[tuple[str, int, float]]:
 
 
 def explain_example(ep: dict) -> str:
+    push = format_push(ep)
+    timing = ep.get("fail_vs_impulse", "")
     if ep["category"] == CAT_OVERTURN:
         return (
-            f"Сильный боковой толчок ({ep['lateral_vel']:+.2f} м/с) раскрутил корпус: "
+            f"Сильный боковой импульс ({push}) раскрутил корпус: "
             f"макс. |qvel[3]| = {ep['max_abs_roll_rate']:.2f} рад/с (> {ROLL_RATE_THRESHOLD}). "
+            f"Сбой {timing}. "
             "Суставной PD держит стойку ног, но не гасит крен, поэтому робот опрокидывается."
         )
     if ep["category"] == CAT_SLIP:
         return (
             f"Трение пола низкое ({ep['friction']:.3f} < {SLIP_FRICTION_THRESHOLD}), "
             f"крен умеренный (|qvel[3]| = {ep['max_abs_roll_rate']:.2f} рад/с). "
+            f"Сбой {timing}. "
             "Опоры проскальзывают, ноги разъезжаются, высота корпуса падает без резкого опрокидывания."
         )
     return (
         f"Смешанный случай: friction={ep['friction']:.3f}, "
-        f"толчок {ep['lateral_vel']:+.2f} м/с, "
+        f"толчок {push}, "
         f"|qvel[3]|={ep['max_abs_roll_rate']:.2f} рад/с, "
         f"скорость корпуса {ep['max_body_speed']:.2f} м/с. "
+        f"Сбой {timing}. "
         "Одновременно есть и скольжение, и потеря равновесия, одного признака недостаточно."
     )
 
@@ -106,14 +176,14 @@ def _sort_category(name: str, items: list[dict]) -> list[dict]:
     if name == CAT_OVERTURN:
         return sorted(
             items,
-            key=lambda ep: (ep["max_abs_roll_rate"], abs(ep["lateral_vel"])),
+            key=lambda ep: (ep["max_abs_roll_rate"], abs(ep["lateral_force"])),
             reverse=True,
         )
     if name == CAT_SLIP:
         return sorted(items, key=lambda ep: (ep["friction"], -ep["max_body_speed"]))
     return sorted(
         items,
-        key=lambda ep: (abs(ep["lateral_vel"]), ep["max_body_speed"]),
+        key=lambda ep: (abs(ep["lateral_force"]), ep["max_body_speed"]),
         reverse=True,
     )
 
@@ -190,7 +260,7 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
     lines = [
         "# Диагностика сбоев Go2",
         "",
-        "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, стресс — трение пола и боковой толчок.",
+        "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, стресс — трение пола и боковая сила Fy на корпус в окне удара.",
         "",
         "## Общая статистика",
         "",
@@ -198,6 +268,8 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
         f"- сбоев: {n_fail}" + (f" ({rate * 100:.1f}%)" if isinstance(rate, (int, float)) else ""),
         f"- устояли: {n_survived}",
         f"- PD: kp={payload.get('kp')}, kd={payload.get('kd')}",
+        f"- окно удара: шаги {_as_int(payload.get('impulse_start'), DEFAULT_IMPULSE_START)}.."
+        f"{_as_int(payload.get('impulse_end'), DEFAULT_IMPULSE_END)}",
         "",
         "## Категории сбоев",
         "",
@@ -221,8 +293,9 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
                 f"### Пример {i}. Эпизод {ep['episode']} — {ep['category']}",
                 "",
                 f"- трение: {ep['friction']:.3f}",
-                f"- боковой толчок: {ep['lateral_vel']:+.3f} м/с",
-                f"- сбой: шаг {ep['fail_step']}, t={ep['fail_time']:.3f} с, z={ep['final_z']:.3f}",
+                f"- боковая сила: {format_push(ep)}",
+                f"- сбой: шаг {ep['fail_step']} ({ep['fail_vs_impulse']}), "
+                f"t={ep['fail_time']:.3f} с, z={ep['final_z']:.3f}",
                 f"- макс. |qvel[3]| (крен): {ep['max_abs_roll_rate']:.3f} рад/с",
                 f"- макс. скорость корпуса: {ep['max_body_speed']:.3f} м/с",
                 f"- высота в окне: {ep['z_first']:.3f} → {ep['z_last']:.3f}",
