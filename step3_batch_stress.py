@@ -60,12 +60,22 @@ PARAMETER_SWEEPS = (
                 "factor": {"kind": "com_offset", "offset": [0.0, 0.0, 0.0]},
             },
             {
-                "id": "weak",
+                "id": "weak_neg",
+                "label": "слабый −0.02 м",
+                "factor": {"kind": "com_offset", "offset": [0.0, -0.02, 0.0]},
+            },
+            {
+                "id": "weak_pos",
                 "label": "слабый +0.02 м",
                 "factor": {"kind": "com_offset", "offset": [0.0, 0.02, 0.0]},
             },
             {
-                "id": "harsh",
+                "id": "harsh_neg",
+                "label": "жёсткий −0.04 м",
+                "factor": {"kind": "com_offset", "offset": [0.0, -0.04, 0.0]},
+            },
+            {
+                "id": "harsh_pos",
                 "label": "жёсткий +0.04 м",
                 "factor": {"kind": "com_offset", "offset": [0.0, 0.04, 0.0]},
             },
