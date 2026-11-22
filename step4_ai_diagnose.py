@@ -507,24 +507,39 @@ def scenario_blurb(payload: dict) -> str:
             "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
             f"сценарий `{sid}` — {label}. Стресс — трение пола и усиленный боковой удар Fy до ±500 Н."
         )
+    if sid == "nominal":
+        return (
+            "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
+            f"сценарий `{sid}` — {label}."
+        )
+    if sid == "moderate":
+        return (
+            "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
+            f"сценарий `{sid}` — {label}."
+        )
+    if sid == "extreme":
+        return (
+            "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
+            f"сценарий `{sid}` — {label}."
+        )
     return (
         "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
         "стресс — трение пола и боковая сила Fy до ±350 Н на корпус в окне удара."
     )
 
 
-def format_sweep_sections(payload: dict) -> list[str]:
-    sweeps = payload.get("parameter_sweeps") or {}
+def format_one_sweep(sweeps: dict, heading: str | None = None) -> list[str]:
     parameters = sweeps.get("parameters") or []
     if not parameters:
         return []
 
     n_ep = _as_int(sweeps.get("n_episodes"), 0)
-    sid = sweeps.get("scenario") or payload.get("scenario") or "default"
-    slabel = sweeps.get("scenario_label") or payload.get("scenario_label") or sid
+    sid = sweeps.get("scenario") or "default"
+    slabel = sweeps.get("scenario_label") or sid
+    title = heading or "One-factor-at-a-time по параметрам"
     lines = [
         "",
-        "## One-factor-at-a-time по параметрам",
+        f"## {title}",
         "",
         f"Батч {n_ep} эпизодов на каждый уровень, seed={sweeps.get('seed')}, "
         f"сценарий `{sid}` — {slabel}. "
@@ -584,6 +599,28 @@ def format_sweep_sections(payload: dict) -> list[str]:
     return lines
 
 
+def format_sweep_sections(payload: dict) -> list[str]:
+    by_scenario = payload.get("parameter_sweeps_by_scenario") or {}
+    if by_scenario:
+        lines: list[str] = []
+        order = ("nominal", "moderate", "extreme", "default")
+        seen: set[str] = set()
+        for sid in list(order) + list(by_scenario):
+            if sid in seen or sid not in by_scenario:
+                continue
+            seen.add(sid)
+            sweeps = by_scenario[sid]
+            label = sweeps.get("scenario_label") or sid
+            role = {
+                "nominal": "контроль",
+                "moderate": "чувствительность",
+            }.get(sid, sid)
+            lines += format_one_sweep(sweeps, f"OFAT: {sid} ({role}) — {label}")
+        return lines
+    sweeps = payload.get("parameter_sweeps") or {}
+    return format_one_sweep(sweeps)
+
+
 def build_markdown(payload: dict, episodes: list[dict]) -> str:
     n_fail = len(episodes)
     n_all = payload.get("n_episodes")
@@ -610,8 +647,15 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
         "## Общая статистика",
         "",
         f"- всего прогонов: {n_all}",
-        f"- сбоев: {n_fail}" + (f" ({rate * 100:.1f}%)" if isinstance(rate, (int, float)) else ""),
+        f"- сбоев (новый критерий): {n_fail}"
+        + (f" ({rate * 100:.1f}%)" if isinstance(rate, (int, float)) else ""),
         f"- устояли: {n_survived}",
+        f"- просадка z<0.20: {payload.get('n_sag')} "
+        + (
+            f"({float(payload.get('sag_rate')) * 100:.1f}%)"
+            if isinstance(payload.get("sag_rate"), (int, float))
+            else ""
+        ),
         f"- сценарий: `{sid}` — {slabel}.{scenario_note}",
         f"- PD: kp={payload.get('kp')}, kd={payload.get('kd')}",
         f"- окно удара: шаги {_as_int(payload.get('impulse_start'), DEFAULT_IMPULSE_START)}.."
