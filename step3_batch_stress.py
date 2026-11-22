@@ -74,6 +74,8 @@ NOISE_PROBE_VARIANTS = (
 )
 BIAS_PROBE_VARIANTS = (
     ("none", 0.0, 0.0),
+    ("weak_neg", -0.015, 0.0),
+    ("weak_pos", 0.015, 0.0),
     ("offset", 0.05, 0.0),
     ("drift", 0.0, 0.0002),
 )
@@ -305,6 +307,16 @@ PARAMETER_SWEEPS = (
                 "id": "none",
                 "label": "без смещения",
                 "factor": {"kind": "bias", "q": 0.0, "drift": 0.0},
+            },
+            {
+                "id": "weak_neg",
+                "label": "слабый −0.015 рад",
+                "factor": {"kind": "bias", "q": -0.015, "drift": 0.0},
+            },
+            {
+                "id": "weak_pos",
+                "label": "слабый +0.015 рад",
+                "factor": {"kind": "bias", "q": 0.015, "drift": 0.0},
             },
             {
                 "id": "offset",

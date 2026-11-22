@@ -415,8 +415,8 @@ SWEEP_FIXES = {
     "sensor_bias": (
         "Калибровать энкодеры и не оставлять постоянное смещение нуля: "
         "в контуре PD это `obs_bias_q` / дрейф `obs_drift_q`. "
-        "Смещение +0.05 рад на всех суставах уводит стойку, "
-        "нарастающий дрейф ещё сильнее валит до и после удара. "
+        "Смещение около ±0.015 рад ещё переходное, +0.05 рад на всех суставах "
+        "уже уводит стойку, нарастающий дрейф валит до и после удара. "
         "В железе периодически обнулять офсет энкодеров."
     ),
 }
@@ -424,6 +424,69 @@ SWEEP_FIXES = {
 
 def sweep_level_rate(level: dict) -> float:
     return _as_float(level.get("failure_rate"))
+
+
+def sweep_param_delta(param: dict) -> float:
+    stored = param.get("worst_delta_vs_baseline")
+    if stored is not None:
+        return _as_float(stored)
+    levels = list(param.get("levels") or [])
+    if not levels:
+        return 0.0
+    baseline_id = param.get("baseline")
+    baseline = next((lv for lv in levels if lv.get("id") == baseline_id), levels[0])
+    worst = max(levels, key=sweep_level_rate)
+    return sweep_level_rate(worst) - sweep_level_rate(baseline)
+
+
+def format_leader_item(param: dict) -> str:
+    name = param.get("name") or param.get("id")
+    levels = list(param.get("levels") or [])
+    level = param.get("worst_label") or param.get("worst_level")
+    rate = param.get("worst_failure_rate")
+    if rate is None and levels:
+        worst = max(levels, key=sweep_level_rate)
+        rate = sweep_level_rate(worst)
+        level = level or worst.get("label") or worst.get("id")
+    return (
+        f"**{name}** ({level}: {_as_float(rate) * 100:.1f}% сбоев, "
+        f"{sweep_param_delta(param) * 100:+.1f} п.п. к норме)"
+    )
+
+
+def collect_sweep_leaders(parameters: list[dict], eps: float = 1e-12) -> list[dict]:
+    scored: list[tuple[float, dict]] = []
+    for param in parameters:
+        if not param.get("levels"):
+            continue
+        scored.append((sweep_param_delta(param), param))
+    if not scored:
+        return []
+    best_delta = max(delta for delta, _ in scored)
+    return [param for delta, param in scored if abs(delta - best_delta) <= eps]
+
+
+def format_sweep_leaders(parameters: list[dict]) -> list[str]:
+    leaders = collect_sweep_leaders(parameters)
+    if not leaders:
+        return []
+    best_delta = sweep_param_delta(leaders[0])
+    if best_delta <= 1e-12:
+        return [
+            "На этом батче ни один параметр не хуже нормы. "
+            "Ниже — куда править модель и контур."
+        ]
+    items = [format_leader_item(param) for param in leaders]
+    if len(items) == 1:
+        return [
+            f"Сильнее всего батч портит {items[0]}. "
+            "Ниже — куда править модель и контур."
+        ]
+    joined = "; ".join(items)
+    return [
+        f"Сильнее всего батч портят (ничья по приросту к норме): {joined}. "
+        "Ниже — куда править модель и контур."
+    ]
 
 
 def scenario_heading(payload: dict) -> tuple[str, str]:
@@ -468,7 +531,6 @@ def format_sweep_sections(payload: dict) -> list[str]:
         "Ниже — процент сбоев и прирост относительно нормы (базового уровня).",
         "",
     ]
-    worst_overall = None
     for param in parameters:
         name = param.get("name") or param.get("id")
         baseline_id = param.get("baseline")
@@ -497,24 +559,10 @@ def format_sweep_sections(payload: dict) -> list[str]:
             f"{(sweep_level_rate(worst) - base_rate) * 100:+.1f} п.п. к норме)."
         )
         lines.append("")
-        delta_worst = sweep_level_rate(worst) - base_rate
-        if worst_overall is None or delta_worst > worst_overall["delta"]:
-            worst_overall = {
-                "name": name,
-                "id": param.get("id"),
-                "level": worst.get("label"),
-                "delta": delta_worst,
-                "rate": sweep_level_rate(worst),
-            }
 
     lines += ["## Что и где менять", ""]
-    if worst_overall:
-        lines.append(
-            f"Сильнее всего батч портит **{worst_overall['name']}** "
-            f"({worst_overall['level']}: {worst_overall['rate'] * 100:.1f}% сбоев, "
-            f"{worst_overall['delta'] * 100:+.1f} п.п. к норме). Ниже — куда править модель и контур."
-        )
-        lines.append("")
+    lines += format_sweep_leaders(parameters)
+    lines.append("")
     for param in parameters:
         pid = str(param.get("id") or "")
         advice = SWEEP_FIXES.get(pid) or (
