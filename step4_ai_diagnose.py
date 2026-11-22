@@ -101,12 +101,26 @@ def impact_phase_of(fail_step: int, start: int, end: int, stored: object = None)
     return PHASE_AFTER
 
 
+def _steps_word(n: int) -> str:
+    count = abs(int(n))
+    mod10 = count % 10
+    mod100 = count % 100
+    if mod10 == 1 and mod100 != 11:
+        return "шаг"
+    if 2 <= mod10 <= 4 and not 12 <= mod100 <= 14:
+        return "шага"
+    return "шагов"
+
+
 def fail_vs_impulse(fail_step: int, start: int, end: int) -> str:
     if fail_step < start:
-        return f"до удара ({start - fail_step} шагов до начала {start}..{end})"
+        delta = start - fail_step
+        return f"до удара ({delta} {_steps_word(delta)} до начала {start}..{end})"
     if fail_step <= end:
-        return f"во время удара (+{fail_step - start} шагов от начала {start}..{end})"
-    return f"после удара (+{fail_step - end} шагов после конца {start}..{end})"
+        delta = fail_step - start
+        return f"во время удара (+{delta} {_steps_word(delta)} от начала {start}..{end})"
+    delta = fail_step - end
+    return f"после удара (+{delta} {_steps_word(delta)} после конца {start}..{end})"
 
 
 def format_push(ep: dict) -> str:
@@ -230,7 +244,7 @@ def mixed_comment(ep: dict) -> str:
     if sag_like and not near_overturn:
         return (
             "Преобладает низкое или среднее трение с просадкой корпуса "
-            "(крен слабый, это ближе к разъезжанию, но μ >= 0.15, поэтому не отдельная категория)."
+            "(крен слабый, это ближе к разъезжанию, но μ ≥ 0.15, поэтому нет отдельной категории)."
         )
     if near_overturn:
         return (
@@ -334,14 +348,137 @@ def pick_examples(episodes: list[dict], limit: int = 3) -> list[dict]:
     return picked[:limit]
 
 
-def controller_recommendations(stats: list[tuple[str, int, float]]) -> list[str]:
+def controller_recommendations(stats: list[tuple[str, int, int, float]]) -> list[str]:
     _ = stats
     return [
-        "Добавить контур по ориентации корпуса (PD по крену/тангажу), а не только по углам суставов: текущий регулятор не видит ω корпуса.",
+        "Добавить контур по ориентации корпуса (PD по крену и тангажу), а не только по углам суставов: текущий регулятор не видит угловую скорость корпуса.",
         "При большом |qvel[3]| расширять опору (hip abduction) и гасить крен, не увеличивая kp ног вслепую.",
         "На низком трении ограничивать горизонтальную силу стоп и снижать kp: жёсткая стойка на льду разгоняет проскальзывание.",
-        "Оценивать скольжение по росту скорости корпуса без роста крена и переключать режим: мягче на скользком, жёстче при ударе; в коленях добавить компенсацию тяжести.",
+        "Оценивать скольжение по росту скорости корпуса без роста крена и переключать режим: мягче на скользком, жёстче при ударе.",
+        "В коленях добавить компенсацию тяжести, чтобы стойка меньше проседала до удара.",
     ]
+
+
+SWEEP_FIXES = {
+    "com_y": (
+        "Ограничить боковое смещение COM: в `go2.xml` у body `base` поле "
+        "`inertial pos` (это `body_ipos`), не сдвигать Y больше чем на ~1–2 см. "
+        "В железе не смещать батарею/нагрузку в сторону."
+    ),
+    "com_z": (
+        "Не задирать COM по Z: тот же `inertial pos` у `base` в `go2.xml`. "
+        "Высокий COM быстрее валит после Fy; держать массу ближе к исходным -0.005 м."
+    ),
+    "action_delay": (
+        "Снизить задержку команд до 0–2 шагов: в контуре управления слать `ctrl` "
+        "на каждом `mj_step`, без очереди. В `step3_batch_stress.py` это "
+        "`action_delay` / фактор `delay`."
+    ),
+    "joint_damping": (
+        "Вернуть демпфирование шарниров ног к штатным ~2 Н·м·с/рад: в `go2.xml` "
+        "`<joint damping=\"2\">` (поле `dof_damping`). Нулевой damping даёт "
+        "лишние колебания и падения до/после удара; 10x зажимает стойку, но "
+        "меняет динамику."
+    ),
+    "floor_contact": (
+        "Не делать пол слишком податливым: `solref`/`solimp` у geom `floor` в "
+        "`scene.xml` и у лап FL/FR/RL/RR в `go2.xml` (у лап `priority=1`, от них "
+        "MuJoCo берёт контакт). Мягкий solref ~0.08 проваливает корпус ещё до Fy; "
+        "для стенда ближе к 0.02 / штатному solimp лап."
+    ),
+    "sensor_noise": (
+        "Ограничить шум в измерениях регулятора: фильтровать энкодеры и IMU, "
+        "не добавлять сильный шум в расчёт PD (`obs_noise_q` / `obs_noise_v` в "
+        "`apply_pd`). Средний шум σq=0.03 уже портит стойку, сильный σq=0.12 — сильнее."
+    ),
+}
+
+
+def sweep_level_rate(level: dict) -> float:
+    return _as_float(level.get("failure_rate"))
+
+
+def format_sweep_sections(payload: dict) -> list[str]:
+    sweeps = payload.get("parameter_sweeps") or {}
+    parameters = sweeps.get("parameters") or []
+    if not parameters:
+        return []
+
+    n_ep = _as_int(sweeps.get("n_episodes"), 0)
+    lines = [
+        "",
+        "## One-factor-at-a-time по параметрам",
+        "",
+        f"Батч {n_ep} эпизодов на каждый уровень, seed={sweeps.get('seed')}. "
+        "Ниже — процент сбоев и прирост относительно нормы (базового уровня).",
+        "",
+    ]
+    worst_overall = None
+    for param in parameters:
+        name = param.get("name") or param.get("id")
+        baseline_id = param.get("baseline")
+        levels = list(param.get("levels") or [])
+        if not levels:
+            continue
+        baseline = next((lv for lv in levels if lv.get("id") == baseline_id), levels[0])
+        base_rate = sweep_level_rate(baseline)
+        worst = max(levels, key=sweep_level_rate)
+        lines.append(f"### {name} (`{param.get('id')}`)")
+        lines.append("")
+        for level in levels:
+            rate = sweep_level_rate(level)
+            delta = _as_float(level.get("delta_vs_baseline"), rate - base_rate)
+            mark = " — норма" if level.get("id") == baseline.get("id") else ""
+            lines.append(
+                f"- **{level.get('label', level.get('id'))}**: "
+                f"сбои {rate * 100:.1f}% "
+                f"({_as_int(level.get('n_failures'))}/{_as_int(level.get('n_episodes'))}), "
+                f"прирост к норме {delta * 100:+.1f} п.п.{mark}"
+            )
+        lines.append("")
+        lines.append(
+            f"Больше всего сбоев: **{worst.get('label', worst.get('id'))}** "
+            f"({sweep_level_rate(worst) * 100:.1f}%, "
+            f"{(sweep_level_rate(worst) - base_rate) * 100:+.1f} п.п. к норме)."
+        )
+        lines.append("")
+        delta_worst = sweep_level_rate(worst) - base_rate
+        if worst_overall is None or delta_worst > worst_overall["delta"]:
+            worst_overall = {
+                "name": name,
+                "id": param.get("id"),
+                "level": worst.get("label"),
+                "delta": delta_worst,
+                "rate": sweep_level_rate(worst),
+            }
+
+    lines += ["## Что и где менять", ""]
+    if worst_overall:
+        lines.append(
+            f"Сильнее всего батч портит **{worst_overall['name']}** "
+            f"({worst_overall['level']}: {worst_overall['rate'] * 100:.1f}% сбоев, "
+            f"{worst_overall['delta'] * 100:+.1f} п.п. к норме). Ниже — куда править модель и контур."
+        )
+        lines.append("")
+    for param in parameters:
+        pid = str(param.get("id") or "")
+        advice = SWEEP_FIXES.get(pid)
+        if not advice:
+            continue
+        worst_id = param.get("worst_level")
+        worst_label = param.get("worst_label")
+        delta = _as_float(param.get("worst_delta_vs_baseline"))
+        if delta <= 1e-12:
+            lines.append(
+                f"- **{param.get('name')}**: на этом батче ни один уровень не хуже нормы. {advice}"
+            )
+        else:
+            lines.append(
+                f"- **{param.get('name')}**: хуже всего уровень «{worst_label or worst_id}» "
+                f"({delta * 100:+.1f} п.п.). {advice}"
+            )
+    lines.append("")
+    return lines
 
 
 def build_markdown(payload: dict, episodes: list[dict]) -> str:
@@ -377,7 +514,12 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
     ]
     if n_fail == 0:
         lines.append("Сбойных эпизодов нет.")
-        return "\n".join(lines) + "\n"
+        lines += format_sweep_sections(payload)
+        lines += ["## Рекомендации для контроллера", ""]
+        for rec in recs:
+            lines.append(f"- {rec}")
+        lines.append("")
+        return "\n".join(lines)
 
     for name, n, n_before, pct in stats:
         before_note = (
@@ -448,6 +590,8 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
                 explain_example(ep),
                 "",
             ]
+
+    lines += format_sweep_sections(payload)
 
     lines += ["## Рекомендации для контроллера", ""]
     for rec in recs:

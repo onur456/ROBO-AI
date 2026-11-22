@@ -12,6 +12,7 @@ import mujoco
 MODEL_PATH = r"C:\Users\HP\Desktop\mujoco_menagerie-main\mujoco_menagerie-main\unitree_go2\scene.xml"
 N_ENVS = 80
 N_EPISODES = N_ENVS
+N_SWEEP_EPISODES = 50
 CHUNK_SIZE = 10
 MAX_STEPS = 1500
 WINDOW_SIZE = 200
@@ -46,6 +47,150 @@ NOISE_PROBE_VARIANTS = (
     ("none", 0.0, 0.0),
     ("medium", 0.03, 0.3),
     ("strong", 0.12, 1.2),
+)
+PARAMETER_SWEEPS = (
+    {
+        "id": "com_y",
+        "name": "смещение COM по Y",
+        "baseline": "zero",
+        "levels": (
+            {
+                "id": "zero",
+                "label": "базовый 0 м",
+                "factor": {"kind": "com_offset", "offset": [0.0, 0.0, 0.0]},
+            },
+            {
+                "id": "weak",
+                "label": "слабый +0.02 м",
+                "factor": {"kind": "com_offset", "offset": [0.0, 0.02, 0.0]},
+            },
+            {
+                "id": "harsh",
+                "label": "жёсткий +0.04 м",
+                "factor": {"kind": "com_offset", "offset": [0.0, 0.04, 0.0]},
+            },
+        ),
+    },
+    {
+        "id": "com_z",
+        "name": "смещение COM по Z",
+        "baseline": "zero",
+        "levels": (
+            {
+                "id": "zero",
+                "label": "базовый 0 м",
+                "factor": {"kind": "com_offset", "offset": [0.0, 0.0, 0.0]},
+            },
+            {
+                "id": "weak",
+                "label": "слабый +0.015 м",
+                "factor": {"kind": "com_offset", "offset": [0.0, 0.0, 0.015]},
+            },
+            {
+                "id": "harsh",
+                "label": "жёсткий +0.03 м",
+                "factor": {"kind": "com_offset", "offset": [0.0, 0.0, 0.03]},
+            },
+        ),
+    },
+    {
+        "id": "action_delay",
+        "name": "задержка команд",
+        "baseline": "zero",
+        "levels": (
+            {
+                "id": "zero",
+                "label": "базовая 0 шагов",
+                "factor": {"kind": "delay", "steps": 0},
+            },
+            {
+                "id": "weak",
+                "label": "слабая 5 шагов",
+                "factor": {"kind": "delay", "steps": 5},
+            },
+            {
+                "id": "harsh",
+                "label": "жёсткая 15 шагов",
+                "factor": {"kind": "delay", "steps": 15},
+            },
+        ),
+    },
+    {
+        "id": "joint_damping",
+        "name": "демпфирование суставов",
+        "baseline": "base",
+        "levels": (
+            {
+                "id": "base",
+                "label": "базовое 1x",
+                "factor": {"kind": "damping", "scale": 1.0},
+            },
+            {
+                "id": "weak",
+                "label": "слабое 0x",
+                "factor": {"kind": "damping", "scale": 0.0},
+            },
+            {
+                "id": "harsh",
+                "label": "жёсткое 10x",
+                "factor": {"kind": "damping", "scale": 10.0},
+            },
+        ),
+    },
+    {
+        "id": "floor_contact",
+        "name": "мягкость контакта пола",
+        "baseline": "baseline",
+        "levels": (
+            {
+                "id": "baseline",
+                "label": "базовый solref",
+                "factor": {"kind": "contact", "preset": "baseline"},
+            },
+            {
+                "id": "stiff",
+                "label": "жёсткий пол",
+                "factor": {
+                    "kind": "contact",
+                    "preset": "stiff",
+                    "solref": [0.002, 1.0],
+                    "solimp": [0.9, 0.99, 0.0001, 0.5, 2.0],
+                },
+            },
+            {
+                "id": "soft",
+                "label": "податливый пол",
+                "factor": {
+                    "kind": "contact",
+                    "preset": "soft",
+                    "solref": [0.08, 0.5],
+                    "solimp": [0.0, 0.9, 0.05, 0.5, 2.0],
+                },
+            },
+        ),
+    },
+    {
+        "id": "sensor_noise",
+        "name": "шум датчиков",
+        "baseline": "none",
+        "levels": (
+            {
+                "id": "none",
+                "label": "без шума",
+                "factor": {"kind": "noise", "q": 0.0, "v": 0.0},
+            },
+            {
+                "id": "medium",
+                "label": "средний шум",
+                "factor": {"kind": "noise", "q": 0.03, "v": 0.3},
+            },
+            {
+                "id": "strong",
+                "label": "сильный шум",
+                "factor": {"kind": "noise", "q": 0.12, "v": 1.2},
+            },
+        ),
+    },
 )
 PD_MODES = {
     "baseline": {"kp": 25.0, "kd": 1.5},
@@ -345,6 +490,49 @@ def write_geom_contact(
     if float(np.max(np.abs(written_imp - solimp))) > 1e-12:
         raise RuntimeError("не удалось записать geom_solimp")
     return written_ref, written_imp
+
+
+def apply_model_factor(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    factor: dict | None,
+) -> None:
+    if not factor:
+        return
+    kind = factor.get("kind")
+    if kind == "com_offset":
+        origin = read_body_ipos(model, torso_body_id)
+        offset = np.asarray(factor.get("offset", (0.0, 0.0, 0.0)), dtype=float)
+        write_body_ipos(model, data, torso_body_id, origin + offset)
+        return
+    if kind == "damping":
+        origin = read_dof_damping(model)
+        legs = leg_dof_ids(model)
+        scaled = origin.copy()
+        scaled[legs] = origin[legs] * float(factor.get("scale", 1.0))
+        write_dof_damping(model, scaled)
+        return
+    if kind == "contact":
+        preset = factor.get("preset")
+        if preset in (None, "baseline"):
+            return
+        n_geoms = len(friction_geoms)
+        solref = np.tile(np.asarray(factor["solref"], dtype=float), (n_geoms, 1))
+        solimp = np.tile(np.asarray(factor["solimp"], dtype=float), (n_geoms, 1))
+        write_geom_contact(model, friction_geoms, solref, solimp)
+
+
+def control_from_factor(factor: dict | None) -> tuple[int, float, float]:
+    if not factor:
+        return 0, 0.0, 0.0
+    kind = factor.get("kind")
+    if kind == "delay":
+        return int(factor.get("steps", 0)), 0.0, 0.0
+    if kind == "noise":
+        return 0, float(factor.get("q", 0.0)), float(factor.get("v", 0.0))
+    return 0, 0.0, 0.0
 
 
 def snapshot(step: int, data: mujoco.MjData, z: float) -> dict:
@@ -960,12 +1148,14 @@ def run_stress_batch(
     kp: float,
     kd: float,
     keep_windows: bool,
+    factor: dict | None = None,
 ) -> dict:
     failed_episodes: list[dict] = []
     failed_friction: list[float] = []
     failed_force: list[float] = []
     survived_friction: list[float] = []
     survived_force: list[float] = []
+    delay, noise_q, noise_v = control_from_factor(factor)
 
     for episode, friction, lateral_force in specs:
         reset_to_stance(model, data)
@@ -974,6 +1164,12 @@ def run_stress_batch(
 
         window: deque[dict] | None = deque(maxlen=WINDOW_SIZE) if keep_windows else None
         episode_failed = False
+        ctrl_buf: deque[np.ndarray] = deque(maxlen=max(0, delay) + 1)
+        obs_rng = (
+            np.random.default_rng(SEED + int(episode))
+            if noise_q > 0.0 or noise_v > 0.0
+            else None
+        )
         params = {
             "episode": episode,
             "friction": friction,
@@ -987,7 +1183,18 @@ def run_stress_batch(
         }
 
         for step in range(1, MAX_STEPS + 1):
-            apply_pd(model, data, target_qpos, kp=kp, kd=kd)
+            apply_pd(
+                model,
+                data,
+                target_qpos,
+                kp=kp,
+                kd=kd,
+                rng=obs_rng,
+                obs_noise_q=noise_q,
+                obs_noise_v=noise_v,
+            )
+            ctrl_buf.append(np.array(data.ctrl, copy=True))
+            data.ctrl[:] = ctrl_buf[0]
             apply_torso_impulse(data, torso_body_id, step, lateral_force)
             mujoco.mj_step(model, data)
             z = float(data.qpos[2])
@@ -1066,6 +1273,8 @@ def _run_chunk(payload: dict) -> dict:
     torso_body_id = find_torso_body_id(model)
     friction_geoms = [floor_id] + [geom_id for geom_id in foot_ids if geom_id != floor_id]
     target_qpos = np.asarray(payload["target_qpos"], dtype=float)
+    factor = payload.get("factor")
+    apply_model_factor(model, data, friction_geoms, torso_body_id, factor)
     return run_stress_batch(
         model,
         data,
@@ -1077,6 +1286,7 @@ def _run_chunk(payload: dict) -> dict:
         float(payload["kp"]),
         float(payload["kd"]),
         bool(payload["keep_windows"]),
+        factor=factor,
     )
 
 
@@ -1124,6 +1334,7 @@ def run_stress_batch_parallel(
     kd: float,
     keep_windows: bool,
     target_qpos: np.ndarray,
+    factor: dict | None = None,
 ) -> dict:
     chunks = split_chunks(specs, CHUNK_SIZE)
     n_workers = min(len(chunks), os.cpu_count() or 1)
@@ -1134,6 +1345,7 @@ def run_stress_batch_parallel(
             "kd": kd,
             "keep_windows": keep_windows,
             "target_qpos": np.asarray(target_qpos, dtype=float).tolist(),
+            "factor": factor,
         }
         for chunk in chunks
     ]
@@ -1149,6 +1361,93 @@ def run_stress_batch_parallel(
     batch["n_workers"] = int(n_workers)
     batch["n_chunks"] = len(chunks)
     return batch
+
+
+def batch_rate_summary(batch: dict) -> dict:
+    return {
+        "n_episodes": int(batch["n_episodes"]),
+        "n_failures": int(batch["n_failures"]),
+        "n_survived": int(batch["n_survived"]),
+        "failure_rate": float(batch["failure_rate"]),
+        "n_before_impact": int(batch["n_before_impact"]),
+        "n_at_or_after_impact": int(batch["n_at_or_after_impact"]),
+        "elapsed_s": batch.get("elapsed_s"),
+        "n_workers": batch.get("n_workers"),
+        "n_chunks": batch.get("n_chunks"),
+    }
+
+
+def run_parameter_sweeps(
+    target_qpos: np.ndarray, kp: float, kd: float
+) -> dict:
+    specs = generate_episode_specs(N_SWEEP_EPISODES, SEED)
+    print(
+        f"\nOFAT-проверка параметров: {N_SWEEP_EPISODES} эпизодов на уровень, "
+        f"seed={SEED}, параллельные воркеры"
+    )
+    parameters: list[dict] = []
+    for spec in PARAMETER_SWEEPS:
+        print(f"  {spec['name']} ({spec['id']}):")
+        levels_out: list[dict] = []
+        for level in spec["levels"]:
+            batch = run_stress_batch_parallel(
+                specs,
+                kp,
+                kd,
+                False,
+                target_qpos,
+                factor=level["factor"],
+            )
+            row = {
+                "id": level["id"],
+                "label": level["label"],
+                "factor": level["factor"],
+                **batch_rate_summary(batch),
+            }
+            levels_out.append(row)
+        baseline = next(
+            (row for row in levels_out if row["id"] == spec["baseline"]),
+            levels_out[0],
+        )
+        base_rate = float(baseline["failure_rate"])
+        worst = max(levels_out, key=lambda row: float(row["failure_rate"]))
+        for row in levels_out:
+            delta = float(row["failure_rate"]) - base_rate
+            row["delta_vs_baseline"] = delta
+            mark = "  (норма)" if row["id"] == baseline["id"] else ""
+            print(
+                f"    {row['label']}: сбои={row['failure_rate'] * 100:.1f}% "
+                f"({row['n_failures']}/{row['n_episodes']})  "
+                f"Δ vs норма={delta * 100:+.1f} п.п.  "
+                f"до 450: {row['n_before_impact']}  "
+                f"при/после 450: {row['n_at_or_after_impact']}  "
+                f"время={row['elapsed_s']:.2f}с{mark}"
+            )
+        print(
+            f"    больше всего сбоев: {worst['label']} "
+            f"({worst['failure_rate'] * 100:.1f}%, "
+            f"{(float(worst['failure_rate']) - base_rate) * 100:+.1f} п.п. к норме)"
+        )
+        parameters.append(
+            {
+                "id": spec["id"],
+                "name": spec["name"],
+                "baseline": spec["baseline"],
+                "levels": levels_out,
+                "worst_level": worst["id"],
+                "worst_label": worst["label"],
+                "baseline_failure_rate": base_rate,
+                "worst_failure_rate": float(worst["failure_rate"]),
+                "worst_delta_vs_baseline": float(worst["failure_rate"]) - base_rate,
+            }
+        )
+    return {
+        "n_episodes": N_SWEEP_EPISODES,
+        "seed": SEED,
+        "kp": kp,
+        "kd": kd,
+        "parameters": parameters,
+    }
 
 
 def main() -> None:
@@ -1236,6 +1535,8 @@ def main() -> None:
         if keep_windows:
             main_batch = batch
 
+    sweeps = run_parameter_sweeps(target_qpos, main_kp, main_kd)
+
     if main_batch is None:
         raise RuntimeError("не удалось выполнить основной прогон PD")
 
@@ -1293,6 +1594,7 @@ def main() -> None:
             "lateral_force": survived_force_stats,
         },
         "failures": failed_episodes,
+        "parameter_sweeps": sweeps,
     }
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     REPORT_PATH.write_text(
