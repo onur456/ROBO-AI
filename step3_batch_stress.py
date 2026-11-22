@@ -19,10 +19,34 @@ WINDOW_SIZE = 200
 FALL_HEIGHT = 0.20
 FRICTION_RANGE = (0.05, 1.0)
 LATERAL_FORCE_RANGE = (-350.0, 350.0)
+HEAVY_FORCE_RANGE = (-500.0, 500.0)
 IMPULSE_START = 450
 IMPULSE_END = 500
 PROBE_FRICTIONS = (0.05, 1.0)
 PROBE_LATERAL_FORCE = 180.0
+SCENARIOS = {
+    "default": {
+        "id": "default",
+        "label": "базовый: трение и боковой удар (Fy до ±350 Н)",
+        "friction_range": FRICTION_RANGE,
+        "lateral_force_range": LATERAL_FORCE_RANGE,
+        "probe_force": PROBE_LATERAL_FORCE,
+    },
+    "slip_only": {
+        "id": "slip_only",
+        "label": "скольжение и стойка без бокового удара (Fy=0)",
+        "friction_range": FRICTION_RANGE,
+        "lateral_force_range": (0.0, 0.0),
+        "probe_force": 0.0,
+    },
+    "heavy_impact": {
+        "id": "heavy_impact",
+        "label": "усиленный боковой удар (Fy до ±500 Н)",
+        "friction_range": FRICTION_RANGE,
+        "lateral_force_range": HEAVY_FORCE_RANGE,
+        "probe_force": 250.0,
+    },
+}
 STANCE_CHECK_FRICTION = 0.8
 STANCE_CHECK_FORCE = 0.0
 SEED = 42
@@ -48,7 +72,34 @@ NOISE_PROBE_VARIANTS = (
     ("medium", 0.03, 0.3),
     ("strong", 0.12, 1.2),
 )
+BIAS_PROBE_VARIANTS = (
+    ("none", 0.0, 0.0),
+    ("offset", 0.05, 0.0),
+    ("drift", 0.0, 0.0002),
+)
 PARAMETER_SWEEPS = (
+    {
+        "id": "com_x",
+        "name": "смещение COM по X",
+        "baseline": "zero",
+        "levels": (
+            {
+                "id": "zero",
+                "label": "базовый 0 м",
+                "factor": {"kind": "com_offset", "offset": [0.0, 0.0, 0.0]},
+            },
+            {
+                "id": "neg",
+                "label": "назад −0.03 м",
+                "factor": {"kind": "com_offset", "offset": [-0.03, 0.0, 0.0]},
+            },
+            {
+                "id": "pos",
+                "label": "вперёд +0.03 м",
+                "factor": {"kind": "com_offset", "offset": [0.03, 0.0, 0.0]},
+            },
+        ),
+    },
     {
         "id": "com_y",
         "name": "смещение COM по Y",
@@ -100,6 +151,28 @@ PARAMETER_SWEEPS = (
                 "id": "harsh",
                 "label": "жёсткий +0.03 м",
                 "factor": {"kind": "com_offset", "offset": [0.0, 0.0, 0.03]},
+            },
+        ),
+    },
+    {
+        "id": "torque_limit",
+        "name": "ограничение момента моторов",
+        "baseline": "full",
+        "levels": (
+            {
+                "id": "full",
+                "label": "базовый 100% ctrlrange",
+                "factor": {"kind": "torque_limit", "scale": 1.0},
+            },
+            {
+                "id": "half",
+                "label": "50% ctrlrange",
+                "factor": {"kind": "torque_limit", "scale": 0.5},
+            },
+            {
+                "id": "harsh",
+                "label": "25% ctrlrange",
+                "factor": {"kind": "torque_limit", "scale": 0.25},
             },
         ),
     },
@@ -201,6 +274,50 @@ PARAMETER_SWEEPS = (
             },
         ),
     },
+    {
+        "id": "control_hold",
+        "name": "частота обновления команды",
+        "baseline": "every",
+        "levels": (
+            {
+                "id": "every",
+                "label": "каждый шаг (500 Гц)",
+                "factor": {"kind": "ctrl_hold", "steps": 1},
+            },
+            {
+                "id": "weak",
+                "label": "каждые 5 шагов (100 Гц)",
+                "factor": {"kind": "ctrl_hold", "steps": 5},
+            },
+            {
+                "id": "harsh",
+                "label": "каждые 20 шагов (25 Гц)",
+                "factor": {"kind": "ctrl_hold", "steps": 20},
+            },
+        ),
+    },
+    {
+        "id": "sensor_bias",
+        "name": "смещение нуля датчиков",
+        "baseline": "none",
+        "levels": (
+            {
+                "id": "none",
+                "label": "без смещения",
+                "factor": {"kind": "bias", "q": 0.0, "drift": 0.0},
+            },
+            {
+                "id": "offset",
+                "label": "смещение нуля +0.05 рад",
+                "factor": {"kind": "bias", "q": 0.05, "drift": 0.0},
+            },
+            {
+                "id": "drift",
+                "label": "дрейф +0.0002 рад/шаг",
+                "factor": {"kind": "bias", "q": 0.0, "drift": 0.0002},
+            },
+        ),
+    },
 )
 PD_MODES = {
     "baseline": {"kp": 25.0, "kd": 1.5},
@@ -227,9 +344,29 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch stress for Go2 PD stance")
     parser.add_argument(
         "--mode",
+        choices=("full", "quick", "ofat"),
+        default="full",
+        help=(
+            "full: единичные проверки, сравнение PD, OFAT и основной батч; "
+            "quick: только основной батч в reports/batch_failures.json; "
+            "ofat: только параллельная OFAT-проверка"
+        ),
+    )
+    parser.add_argument(
+        "--pd",
         choices=tuple(PD_MODES),
         default=MAIN_MODE,
-        help="режим основного прогона и JSON (сравнение всегда baseline vs stiff)",
+        help="PD-режим основного прогона и JSON (в full сравнение всегда baseline vs stiff)",
+    )
+    parser.add_argument(
+        "--scenario",
+        choices=tuple(SCENARIOS),
+        default="default",
+        help=(
+            "default: трение и боковой удар (Fy до ±350 Н); "
+            "slip_only: скольжение/стойка при Fy=0; "
+            "heavy_impact: усиленный удар (Fy до ±500 Н)"
+        ),
     )
     return parser.parse_args()
 
@@ -369,6 +506,7 @@ def apply_pd(
     rng: np.random.Generator | None = None,
     obs_noise_q: float = 0.0,
     obs_noise_v: float = 0.0,
+    obs_bias_q: float = 0.0,
 ) -> None:
     if model.nu != len(target_qpos):
         return
@@ -379,6 +517,8 @@ def apply_pd(
             q_obs = q_obs + rng.normal(0.0, obs_noise_q, size=q_obs.shape)
         if obs_noise_v > 0.0:
             v_obs = v_obs + rng.normal(0.0, obs_noise_v, size=v_obs.shape)
+    if abs(obs_bias_q) > 0.0:
+        q_obs = q_obs + obs_bias_q
     data.ctrl[:] = kp * (target_qpos - q_obs) - kd * v_obs
     if clip_ctrl:
         np.clip(
@@ -532,17 +672,39 @@ def apply_model_factor(
         solref = np.tile(np.asarray(factor["solref"], dtype=float), (n_geoms, 1))
         solimp = np.tile(np.asarray(factor["solimp"], dtype=float), (n_geoms, 1))
         write_geom_contact(model, friction_geoms, solref, solimp)
+        return
+    if kind == "torque_limit":
+        origin = read_ctrlrange(model)
+        scale = float(factor.get("scale", 1.0))
+        write_ctrlrange(model, origin * scale)
 
 
-def control_from_factor(factor: dict | None) -> tuple[int, float, float]:
+def control_from_factor(factor: dict | None) -> dict:
+    cfg = {
+        "delay": 0,
+        "noise_q": 0.0,
+        "noise_v": 0.0,
+        "clip_ctrl": False,
+        "hold": 1,
+        "bias_q": 0.0,
+        "drift_q": 0.0,
+    }
     if not factor:
-        return 0, 0.0, 0.0
+        return cfg
     kind = factor.get("kind")
     if kind == "delay":
-        return int(factor.get("steps", 0)), 0.0, 0.0
-    if kind == "noise":
-        return 0, float(factor.get("q", 0.0)), float(factor.get("v", 0.0))
-    return 0, 0.0, 0.0
+        cfg["delay"] = int(factor.get("steps", 0))
+    elif kind == "noise":
+        cfg["noise_q"] = float(factor.get("q", 0.0))
+        cfg["noise_v"] = float(factor.get("v", 0.0))
+    elif kind == "torque_limit":
+        cfg["clip_ctrl"] = True
+    elif kind == "ctrl_hold":
+        cfg["hold"] = max(1, int(factor.get("steps", 1)))
+    elif kind == "bias":
+        cfg["bias_q"] = float(factor.get("q", 0.0))
+        cfg["drift_q"] = float(factor.get("drift", 0.0))
+    return cfg
 
 
 def snapshot(step: int, data: mujoco.MjData, z: float) -> dict:
@@ -591,6 +753,8 @@ def run_controlled_episode(
     action_delay: int = 0,
     obs_noise_q: float = 0.0,
     obs_noise_v: float = 0.0,
+    obs_bias_q: float = 0.0,
+    obs_drift_q: float = 0.0,
     noise_seed: int | None = None,
 ) -> dict:
     reset_to_stance(model, data)
@@ -627,6 +791,7 @@ def run_controlled_episode(
             rng=obs_rng,
             obs_noise_q=obs_noise_q,
             obs_noise_v=obs_noise_v,
+            obs_bias_q=obs_bias_q + obs_drift_q * (step - 1),
         )
         desired = np.array(data.ctrl, copy=True)
         ctrl_buf.append(desired)
@@ -682,9 +847,10 @@ def probe_friction_effect(
     torso_body_id: int,
     kp: float,
     kd: float,
+    lateral_force: float = COM_PROBE_FORCE,
 ) -> None:
     print(
-        f"\nпроверка трения: Fy={PROBE_LATERAL_FORCE:.1f} Н на шагах "
+        f"\nпроверка трения: Fy={lateral_force:.1f} Н на шагах "
         f"{IMPULSE_START}..{IMPULSE_END}, friction={list(PROBE_FRICTIONS)}"
     )
     results = [
@@ -694,7 +860,7 @@ def probe_friction_effect(
             target_qpos,
             friction_geoms,
             mu,
-            PROBE_LATERAL_FORCE,
+            lateral_force,
             torso_body_id,
             kp=kp,
             kd=kd,
@@ -734,12 +900,13 @@ def probe_com_offset(
     torso_body_id: int,
     kp: float,
     kd: float,
+    lateral_force: float = COM_PROBE_FORCE,
 ) -> None:
     origin = read_body_ipos(model, torso_body_id)
     print(
         f"\nпроверка смещения COM корпуса: body_id={torso_body_id} "
         f"body_ipos0={origin.tolist()}  μ={COM_PROBE_FRICTION:g} "
-        f"Fy={COM_PROBE_FORCE:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}"
+        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}"
     )
     results: list[dict] = []
     try:
@@ -752,7 +919,7 @@ def probe_com_offset(
                 target_qpos,
                 friction_geoms,
                 COM_PROBE_FRICTION,
-                COM_PROBE_FORCE,
+                lateral_force,
                 torso_body_id,
                 kp=kp,
                 kd=kd,
@@ -805,11 +972,12 @@ def probe_torque_limit(
     torso_body_id: int,
     kp: float,
     kd: float,
+    lateral_force: float = COM_PROBE_FORCE,
 ) -> None:
     origin = read_ctrlrange(model)
     print(
         f"\nпроверка ограничения момента: μ={COM_PROBE_FRICTION:g} "
-        f"Fy={COM_PROBE_FORCE:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}  "
+        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}  "
         f"ctrlrange0 hip=[{origin[0, 0]:.2f}, {origin[0, 1]:.2f}]"
     )
     results: list[dict] = []
@@ -822,7 +990,7 @@ def probe_torque_limit(
                 target_qpos,
                 friction_geoms,
                 COM_PROBE_FRICTION,
-                COM_PROBE_FORCE,
+                lateral_force,
                 torso_body_id,
                 kp=kp,
                 kd=kd,
@@ -874,10 +1042,11 @@ def probe_action_delay(
     torso_body_id: int,
     kp: float,
     kd: float,
+    lateral_force: float = COM_PROBE_FORCE,
 ) -> None:
     print(
         f"\nпроверка задержки команд (#6): μ={COM_PROBE_FRICTION:g} "
-        f"Fy={COM_PROBE_FORCE:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}"
+        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}"
     )
     results: list[dict] = []
     for delay in DELAY_PROBE_STEPS:
@@ -887,7 +1056,7 @@ def probe_action_delay(
             target_qpos,
             friction_geoms,
             COM_PROBE_FRICTION,
-            COM_PROBE_FORCE,
+            lateral_force,
             torso_body_id,
             kp=kp,
             kd=kd,
@@ -915,12 +1084,13 @@ def probe_joint_damping(
     torso_body_id: int,
     kp: float,
     kd: float,
+    lateral_force: float = COM_PROBE_FORCE,
 ) -> None:
     origin = read_dof_damping(model)
     legs = leg_dof_ids(model)
     print(
         f"\nпроверка демпфирования суставов (#7): μ={COM_PROBE_FRICTION:g} "
-        f"Fy={COM_PROBE_FORCE:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}  "
+        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}  "
         f"dof_damping ног 1x={origin[legs].tolist()}"
     )
     results: list[dict] = []
@@ -935,7 +1105,7 @@ def probe_joint_damping(
                 target_qpos,
                 friction_geoms,
                 COM_PROBE_FRICTION,
-                COM_PROBE_FORCE,
+                lateral_force,
                 torso_body_id,
                 kp=kp,
                 kd=kd,
@@ -969,12 +1139,13 @@ def probe_body_inertia(
     torso_body_id: int,
     kp: float,
     kd: float,
+    lateral_force: float = COM_PROBE_FORCE,
 ) -> None:
     origin = read_body_inertia(model, torso_body_id)
     print(
         f"\nпроверка инерции корпуса (#8): body_id={torso_body_id} "
         f"body_inertia0={origin.tolist()}  μ={COM_PROBE_FRICTION:g} "
-        f"Fy={COM_PROBE_FORCE:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}"
+        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}"
     )
     results: list[dict] = []
     try:
@@ -986,7 +1157,7 @@ def probe_body_inertia(
                 target_qpos,
                 friction_geoms,
                 COM_PROBE_FRICTION,
-                COM_PROBE_FORCE,
+                lateral_force,
                 torso_body_id,
                 kp=kp,
                 kd=kd,
@@ -1019,12 +1190,13 @@ def probe_floor_contact(
     torso_body_id: int,
     kp: float,
     kd: float,
+    lateral_force: float = COM_PROBE_FORCE,
 ) -> None:
     origin_ref, origin_imp = read_geom_contact(model, friction_geoms)
     print(
         f"\nпроверка контакта пола (#9): geom_ids={friction_geoms} "
         f"solref0={origin_ref[0].tolist()} solimp0={origin_imp[0].tolist()}  "
-        f"μ={COM_PROBE_FRICTION:g} Fy={COM_PROBE_FORCE:.1f} Н "
+        f"μ={COM_PROBE_FRICTION:g} Fy={lateral_force:.1f} Н "
         f"на шагах {IMPULSE_START}..{IMPULSE_END}"
     )
     results: list[dict] = []
@@ -1044,7 +1216,7 @@ def probe_floor_contact(
                 target_qpos,
                 friction_geoms,
                 COM_PROBE_FRICTION,
-                COM_PROBE_FORCE,
+                lateral_force,
                 torso_body_id,
                 kp=kp,
                 kd=kd,
@@ -1083,10 +1255,11 @@ def probe_observation_noise(
     torso_body_id: int,
     kp: float,
     kd: float,
+    lateral_force: float = COM_PROBE_FORCE,
 ) -> None:
     print(
         f"\nпроверка шума измерений (#10): μ={COM_PROBE_FRICTION:g} "
-        f"Fy={COM_PROBE_FORCE:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}  "
+        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}  "
         f"seed={SEED}"
     )
     results: list[dict] = []
@@ -1097,7 +1270,7 @@ def probe_observation_noise(
             target_qpos,
             friction_geoms,
             COM_PROBE_FRICTION,
-            COM_PROBE_FORCE,
+            lateral_force,
             torso_body_id,
             kp=kp,
             kd=kd,
@@ -1117,6 +1290,49 @@ def probe_observation_noise(
         print("  предупреждение: траектории совпали, шум измерений не влияет")
     else:
         print("  траектории различаются, шум измерений влияет на устойчивость")
+
+
+def probe_sensor_bias(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    kp: float,
+    kd: float,
+    lateral_force: float = COM_PROBE_FORCE,
+) -> None:
+    print(
+        f"\nпроверка смещения нуля датчиков: μ={COM_PROBE_FRICTION:g} "
+        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}"
+    )
+    results: list[dict] = []
+    for label, bias_q, drift_q in BIAS_PROBE_VARIANTS:
+        result = run_controlled_episode(
+            model,
+            data,
+            target_qpos,
+            friction_geoms,
+            COM_PROBE_FRICTION,
+            lateral_force,
+            torso_body_id,
+            kp=kp,
+            kd=kd,
+            obs_bias_q=bias_q,
+            obs_drift_q=drift_q,
+        )
+        result["label"] = label
+        results.append(result)
+        print_probe_line(
+            result,
+            extra=f"bias={bias_q:g} рад  drift={drift_q:g} рад/шаг",
+            ref=results[0],
+        )
+    any_diff = print_z_deltas(results, "label")
+    if not any_diff:
+        print("  предупреждение: траектории совпали, смещение нуля датчиков не влияет")
+    else:
+        print("  траектории различаются, смещение нуля датчиков влияет на устойчивость")
 
 
 def probe_stance_hold(
@@ -1165,7 +1381,15 @@ def run_stress_batch(
     failed_force: list[float] = []
     survived_friction: list[float] = []
     survived_force: list[float] = []
-    delay, noise_q, noise_v = control_from_factor(factor)
+    cfg = control_from_factor(factor)
+    delay = int(cfg["delay"])
+    noise_q = float(cfg["noise_q"])
+    noise_v = float(cfg["noise_v"])
+    clip_ctrl = bool(cfg["clip_ctrl"])
+    hold = max(1, int(cfg["hold"]))
+    bias_q = float(cfg["bias_q"])
+    drift_q = float(cfg["drift_q"])
+    limits = np.array(model.actuator_ctrlrange, copy=True)
 
     for episode, friction, lateral_force in specs:
         reset_to_stance(model, data)
@@ -1175,6 +1399,7 @@ def run_stress_batch(
         window: deque[dict] | None = deque(maxlen=WINDOW_SIZE) if keep_windows else None
         episode_failed = False
         ctrl_buf: deque[np.ndarray] = deque(maxlen=max(0, delay) + 1)
+        last_desired: np.ndarray | None = None
         obs_rng = (
             np.random.default_rng(SEED + int(episode))
             if noise_q > 0.0 or noise_v > 0.0
@@ -1193,18 +1418,23 @@ def run_stress_batch(
         }
 
         for step in range(1, MAX_STEPS + 1):
-            apply_pd(
-                model,
-                data,
-                target_qpos,
-                kp=kp,
-                kd=kd,
-                rng=obs_rng,
-                obs_noise_q=noise_q,
-                obs_noise_v=noise_v,
-            )
-            ctrl_buf.append(np.array(data.ctrl, copy=True))
+            if last_desired is None or (step - 1) % hold == 0:
+                apply_pd(
+                    model,
+                    data,
+                    target_qpos,
+                    kp=kp,
+                    kd=kd,
+                    rng=obs_rng,
+                    obs_noise_q=noise_q,
+                    obs_noise_v=noise_v,
+                    obs_bias_q=bias_q + drift_q * (step - 1),
+                )
+                last_desired = np.array(data.ctrl, copy=True)
+            ctrl_buf.append(np.array(last_desired, copy=True))
             data.ctrl[:] = ctrl_buf[0]
+            if clip_ctrl:
+                np.clip(data.ctrl, limits[:, 0], limits[:, 1], out=data.ctrl)
             apply_torso_impulse(data, torso_body_id, step, lateral_force)
             mujoco.mj_step(model, data)
             z = float(data.qpos[2])
@@ -1256,13 +1486,27 @@ def run_stress_batch(
     }
 
 
-def generate_episode_specs(n_episodes: int, seed: int) -> list[tuple[int, float, float]]:
+def sample_uniform(rng: np.random.Generator, bounds: tuple[float, float]) -> float:
+    lo, hi = float(bounds[0]), float(bounds[1])
+    if abs(hi - lo) <= 1e-15:
+        return lo
+    return float(rng.uniform(lo, hi))
+
+
+def generate_episode_specs(
+    n_episodes: int,
+    seed: int,
+    friction_range: tuple[float, float] | None = None,
+    force_range: tuple[float, float] | None = None,
+) -> list[tuple[int, float, float]]:
+    mu_range = friction_range or FRICTION_RANGE
+    fy_range = force_range or LATERAL_FORCE_RANGE
     rng = np.random.default_rng(seed)
     return [
         (
             episode,
-            float(rng.uniform(*FRICTION_RANGE)),
-            float(rng.uniform(*LATERAL_FORCE_RANGE)),
+            sample_uniform(rng, mu_range),
+            sample_uniform(rng, fy_range),
         )
         for episode in range(1, n_episodes + 1)
     ]
@@ -1388,12 +1632,20 @@ def batch_rate_summary(batch: dict) -> dict:
 
 
 def run_parameter_sweeps(
-    target_qpos: np.ndarray, kp: float, kd: float
+    target_qpos: np.ndarray,
+    kp: float,
+    kd: float,
+    scenario: dict,
 ) -> dict:
-    specs = generate_episode_specs(N_SWEEP_EPISODES, SEED)
+    specs = generate_episode_specs(
+        N_SWEEP_EPISODES,
+        SEED,
+        scenario["friction_range"],
+        scenario["lateral_force_range"],
+    )
     print(
         f"\nOFAT-проверка параметров: {N_SWEEP_EPISODES} эпизодов на уровень, "
-        f"seed={SEED}, параллельные воркеры"
+        f"seed={SEED}, сценарий={scenario['id']}, параллельные воркеры"
     )
     parameters: list[dict] = []
     for spec in PARAMETER_SWEEPS:
@@ -1456,66 +1708,83 @@ def run_parameter_sweeps(
         "seed": SEED,
         "kp": kp,
         "kd": kd,
+        "scenario": scenario["id"],
+        "scenario_label": scenario["label"],
+        "friction_range": list(scenario["friction_range"]),
+        "lateral_force_range": list(scenario["lateral_force_range"]),
         "parameters": parameters,
     }
 
 
-def main() -> None:
-    args = parse_args()
-    mode_name = args.mode
-    mode = PD_MODES[mode_name]
-    main_kp = float(mode["kp"])
-    main_kd = float(mode["kd"])
+def load_existing_report() -> dict:
+    if not REPORT_PATH.exists():
+        return {}
+    try:
+        payload = json.loads(REPORT_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
-    model = mujoco.MjModel.from_xml_path(MODEL_PATH)
-    data = mujoco.MjData(model)
-    floor_id = find_floor_geom_id(model)
-    foot_ids = find_foot_geom_ids(model)
-    torso_body_id = find_torso_body_id(model)
-    torso_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, torso_body_id) or ""
-    friction_geoms = [floor_id] + [geom_id for geom_id in foot_ids if geom_id != floor_id]
-    print_floor_selection(model, floor_id, foot_ids)
-    print(
-        f"корпус для импульса: id={torso_body_id} name={torso_name!r} "
-        f"xfrc_applied[:, 1], шаги {IMPULSE_START}..{IMPULSE_END}"
+
+def save_report(report: dict) -> None:
+    merged = load_existing_report()
+    merged.update(report)
+    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    REPORT_PATH.write_text(
+        json.dumps(merged, ensure_ascii=False, indent=2),
+        encoding="utf-8",
     )
-    print(f"основной режим: {mode_name} kp={main_kp:g} kd={main_kd:g}")
-    print(f"seed={SEED}  N_ENVS={N_ENVS}  CHUNK_SIZE={CHUNK_SIZE}")
+    print(f"результаты сохранены: {REPORT_PATH}")
 
-    reset_to_stance(model, data)
-    target_qpos = np.array(data.qpos[7:], copy=True)
-    if model.nu != len(target_qpos):
-        raise RuntimeError(
-            f"число актуаторов ({model.nu}) не совпадает с числом суставов ({len(target_qpos)})"
-        )
 
+def run_single_probes(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    kp: float,
+    kd: float,
+    lateral_force: float = COM_PROBE_FORCE,
+) -> None:
     probe_friction_effect(
-        model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
+        model, data, target_qpos, friction_geoms, torso_body_id, kp=kp, kd=kd, lateral_force=lateral_force
     )
     probe_com_offset(
-        model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
+        model, data, target_qpos, friction_geoms, torso_body_id, kp=kp, kd=kd, lateral_force=lateral_force
     )
     probe_torque_limit(
-        model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
+        model, data, target_qpos, friction_geoms, torso_body_id, kp=kp, kd=kd, lateral_force=lateral_force
     )
     probe_action_delay(
-        model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
+        model, data, target_qpos, friction_geoms, torso_body_id, kp=kp, kd=kd, lateral_force=lateral_force
     )
     probe_joint_damping(
-        model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
+        model, data, target_qpos, friction_geoms, torso_body_id, kp=kp, kd=kd, lateral_force=lateral_force
     )
     probe_body_inertia(
-        model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
+        model, data, target_qpos, friction_geoms, torso_body_id, kp=kp, kd=kd, lateral_force=lateral_force
     )
     probe_floor_contact(
-        model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
+        model, data, target_qpos, friction_geoms, torso_body_id, kp=kp, kd=kd, lateral_force=lateral_force
     )
     probe_observation_noise(
-        model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
+        model, data, target_qpos, friction_geoms, torso_body_id, kp=kp, kd=kd, lateral_force=lateral_force
+    )
+    probe_sensor_bias(
+        model, data, target_qpos, friction_geoms, torso_body_id, kp=kp, kd=kd, lateral_force=lateral_force
     )
 
-    specs = generate_episode_specs(N_ENVS, SEED)
 
+def run_pd_comparison(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    specs: list[tuple[int, float, float]],
+    pd_name: str,
+) -> dict:
     print("\nсравнение PD (стойка: μ=0.8, Fy=0; батч на тех же эпизодах):")
     main_batch = None
     for name, gains in PD_MODES.items():
@@ -1524,7 +1793,7 @@ def main() -> None:
         stance = probe_stance_hold(
             model, data, target_qpos, friction_geoms, torso_body_id, kp=kp, kd=kd
         )
-        keep_windows = name == mode_name
+        keep_windows = name == pd_name
         batch = run_stress_batch_parallel(
             specs,
             kp,
@@ -1544,48 +1813,56 @@ def main() -> None:
         )
         if keep_windows:
             main_batch = batch
-
-    sweeps = run_parameter_sweeps(target_qpos, main_kp, main_kd)
-
     if main_batch is None:
         raise RuntimeError("не удалось выполнить основной прогон PD")
+    return main_batch
 
-    n_failures = main_batch["n_failures"]
-    n_survived = main_batch["n_survived"]
-    failure_rate = main_batch["failure_rate"]
-    failed_episodes = main_batch["failed_episodes"]
-    failed_friction_stats = value_stats(main_batch["failed_friction"])
-    failed_force_stats = value_stats(main_batch["failed_force"])
-    survived_friction_stats = value_stats(main_batch["survived_friction"])
-    survived_force_stats = value_stats(main_batch["survived_force"])
 
-    print(f"\nосновной прогон ({mode_name}, kp={main_batch['kp']:g}, kd={main_batch['kd']:g}):")
-    print(f"всего прогонов: {main_batch['n_episodes']}  seed={SEED}")
+def print_main_batch_summary(pd_name: str, batch: dict) -> None:
+    failed_friction_stats = value_stats(batch["failed_friction"])
+    failed_force_stats = value_stats(batch["failed_force"])
+    survived_friction_stats = value_stats(batch["survived_friction"])
+    survived_force_stats = value_stats(batch["survived_force"])
+    print(f"\nосновной прогон ({pd_name}, kp={batch['kp']:g}, kd={batch['kd']:g}):")
+    print(f"всего прогонов: {batch['n_episodes']}  seed={SEED}")
     print(
-        f"параллельно: {main_batch['n_workers']} workers, "
-        f"{main_batch['n_chunks']} chunks, время={main_batch['elapsed_s']:.2f}с"
+        f"параллельно: {batch['n_workers']} workers, "
+        f"{batch['n_chunks']} chunks, время={batch['elapsed_s']:.2f}с"
     )
-    print(f"упало: {n_failures}")
-    print(f"устояло: {n_survived}")
-    print(f"процент сбоев: {failure_rate * 100:.1f}%")
+    print(f"упало: {batch['n_failures']}")
+    print(f"устояло: {batch['n_survived']}")
+    print(f"процент сбоев: {batch['failure_rate'] * 100:.1f}%")
     print(f"упавшие, трение: {format_stats(failed_friction_stats)}")
     print(f"упавшие, боковая сила: {format_stats(failed_force_stats)}")
     print(f"устоявшие, трение: {format_stats(survived_friction_stats)}")
     print(f"устоявшие, боковая сила: {format_stats(survived_force_stats)}")
 
-    report = {
-        "n_episodes": main_batch["n_episodes"],
+
+def report_from_batch(
+    pd_name: str,
+    run_mode: str,
+    batch: dict,
+    model: mujoco.MjModel,
+    floor_id: int,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    target_qpos: np.ndarray,
+) -> dict:
+    return {
+        "n_episodes": batch["n_episodes"],
         "n_envs": N_ENVS,
-        "n_failures": n_failures,
-        "n_survived": n_survived,
-        "failure_rate": failure_rate,
-        "mode": mode_name,
+        "n_failures": batch["n_failures"],
+        "n_survived": batch["n_survived"],
+        "failure_rate": batch["failure_rate"],
+        "run_mode": run_mode,
+        "mode": pd_name,
+        "pd": pd_name,
         "seed": SEED,
-        "elapsed_s": main_batch.get("elapsed_s"),
-        "n_workers": main_batch.get("n_workers"),
-        "n_chunks": main_batch.get("n_chunks"),
-        "kp": main_batch["kp"],
-        "kd": main_batch["kd"],
+        "elapsed_s": batch.get("elapsed_s"),
+        "n_workers": batch.get("n_workers"),
+        "n_chunks": batch.get("n_chunks"),
+        "kp": batch["kp"],
+        "kd": batch["kd"],
         "floor_geom_id": int(floor_id),
         "floor_geom_name": geom_name(model, floor_id),
         "floor_geom_type": geom_type_name(model, floor_id),
@@ -1596,22 +1873,138 @@ def main() -> None:
         "impulse_end": IMPULSE_END,
         "target_qpos": target_qpos.tolist(),
         "failed": {
-            "friction": failed_friction_stats,
-            "lateral_force": failed_force_stats,
+            "friction": value_stats(batch["failed_friction"]),
+            "lateral_force": value_stats(batch["failed_force"]),
         },
         "survived": {
-            "friction": survived_friction_stats,
-            "lateral_force": survived_force_stats,
+            "friction": value_stats(batch["survived_friction"]),
+            "lateral_force": value_stats(batch["survived_force"]),
         },
-        "failures": failed_episodes,
-        "parameter_sweeps": sweeps,
+        "failures": batch["failed_episodes"],
     }
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text(
-        json.dumps(report, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+
+
+def main() -> None:
+    args = parse_args()
+    run_mode = args.mode
+    pd_name = args.pd
+    scenario = SCENARIOS[args.scenario]
+    mode = PD_MODES[pd_name]
+    main_kp = float(mode["kp"])
+    main_kd = float(mode["kd"])
+
+    model = mujoco.MjModel.from_xml_path(MODEL_PATH)
+    data = mujoco.MjData(model)
+    floor_id = find_floor_geom_id(model)
+    foot_ids = find_foot_geom_ids(model)
+    torso_body_id = find_torso_body_id(model)
+    torso_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, torso_body_id) or ""
+    friction_geoms = [floor_id] + [geom_id for geom_id in foot_ids if geom_id != floor_id]
+    print_floor_selection(model, floor_id, foot_ids)
+    print(
+        f"корпус для импульса: id={torso_body_id} name={torso_name!r} "
+        f"xfrc_applied[:, 1], шаги {IMPULSE_START}..{IMPULSE_END}"
     )
-    print(f"результаты сохранены: {REPORT_PATH}")
+    print(f"режим прогона: {run_mode}")
+    print(f"сценарий: {scenario['id']} — {scenario['label']}")
+    print(
+        f"  Fy диапазон={list(scenario['lateral_force_range'])}, "
+        f"проба Fy={scenario['probe_force']:.1f} Н"
+    )
+    print(f"основной PD: {pd_name} kp={main_kp:g} kd={main_kd:g}")
+    print(f"seed={SEED}  N_ENVS={N_ENVS}  CHUNK_SIZE={CHUNK_SIZE}")
+
+    reset_to_stance(model, data)
+    target_qpos = np.array(data.qpos[7:], copy=True)
+    if model.nu != len(target_qpos):
+        raise RuntimeError(
+            f"число актуаторов ({model.nu}) не совпадает с числом суставов ({len(target_qpos)})"
+        )
+
+    if run_mode == "full":
+        run_single_probes(
+            model,
+            data,
+            target_qpos,
+            friction_geoms,
+            torso_body_id,
+            main_kp,
+            main_kd,
+            lateral_force=float(scenario["probe_force"]),
+        )
+    elif run_mode == "quick":
+        print("\nбыстрый прогон: только основной батч, без проб и OFAT")
+    else:
+        print("\nOFAT-прогон: параллельная проверка параметров, основной батч пропущен")
+
+    episode_specs_kwargs = {
+        "friction_range": scenario["friction_range"],
+        "force_range": scenario["lateral_force_range"],
+    }
+    main_batch = None
+    if run_mode == "full":
+        specs = generate_episode_specs(N_ENVS, SEED, **episode_specs_kwargs)
+        main_batch = run_pd_comparison(
+            model,
+            data,
+            target_qpos,
+            friction_geoms,
+            torso_body_id,
+            specs,
+            pd_name,
+        )
+    elif run_mode == "quick":
+        specs = generate_episode_specs(N_ENVS, SEED, **episode_specs_kwargs)
+        main_batch = run_stress_batch_parallel(
+            specs,
+            main_kp,
+            main_kd,
+            True,
+            target_qpos,
+        )
+
+    sweeps = None
+    if run_mode in ("full", "ofat"):
+        sweeps = run_parameter_sweeps(target_qpos, main_kp, main_kd, scenario)
+
+    report: dict = {
+        "run_mode": run_mode,
+        "scenario": scenario["id"],
+        "scenario_label": scenario["label"],
+        "friction_range": list(scenario["friction_range"]),
+        "lateral_force_range": list(scenario["lateral_force_range"]),
+        "mode": pd_name,
+        "pd": pd_name,
+        "seed": SEED,
+        "kp": main_kp,
+        "kd": main_kd,
+        "floor_geom_id": int(floor_id),
+        "floor_geom_name": geom_name(model, floor_id),
+        "floor_geom_type": geom_type_name(model, floor_id),
+        "geom_friction_shape": list(model.geom_friction.shape),
+        "friction_geom_ids": friction_geoms,
+        "torso_body_id": int(torso_body_id),
+        "impulse_start": IMPULSE_START,
+        "impulse_end": IMPULSE_END,
+        "target_qpos": target_qpos.tolist(),
+    }
+    if main_batch is not None:
+        print_main_batch_summary(pd_name, main_batch)
+        report.update(
+            report_from_batch(
+                pd_name,
+                run_mode,
+                main_batch,
+                model,
+                floor_id,
+                friction_geoms,
+                torso_body_id,
+                target_qpos,
+            )
+        )
+    if sweeps is not None:
+        report["parameter_sweeps"] = sweeps
+    save_report(report)
 
 
 if __name__ == "__main__":

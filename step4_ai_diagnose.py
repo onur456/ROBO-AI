@@ -360,6 +360,12 @@ def controller_recommendations(stats: list[tuple[str, int, int, float]]) -> list
 
 
 SWEEP_FIXES = {
+    "com_x": (
+        "Не смещать COM вдоль корпуса: в `go2.xml` у body `base` поле `inertial pos` "
+        "(ось X, это `body_ipos[0]`). Проверять и −X, и +X (например ±0.03 м). "
+        "Сдвиг вперёд (+X) тянет на нос, назад (−X) — на задние лапы; "
+        "в железе не выносить батарею или груз вдоль корпуса."
+    ),
     "com_y": (
         "Ограничить боковое смещение COM в обе стороны: в `go2.xml` у body `base` "
         "поле `inertial pos` (это `body_ipos`). Проверять и +Y, и −Y "
@@ -370,33 +376,78 @@ SWEEP_FIXES = {
         "Не задирать COM по Z: тот же `inertial pos` у `base` в `go2.xml`. "
         "Высокий COM быстрее валит после Fy; держать массу ближе к исходным −0.005 м."
     ),
+    "torque_limit": (
+        "Не урезать момент моторов без нужды: в `go2.xml` у actuator атрибут "
+        "`ctrlrange` (в рантайме поле `actuator_ctrlrange`). На этом PD 50% часто "
+        "ещё не упирается в лимит, 25% уже режет икроножные (calf). "
+        "Для стенда оставлять штатный 100%; низкий потолок — только если моторы "
+        "реально слабее, и тогда снижать нагрузку или kp, а не только потолок."
+    ),
     "action_delay": (
         "Снизить задержку команд до 0–2 шагов: в контуре управления слать `ctrl` "
         "на каждом `mj_step`, без очереди. В `step3_batch_stress.py` это "
         "`action_delay` / фактор `delay`."
     ),
     "joint_damping": (
-        "Вернуть демпфирование шарниров ног к штатным ~2 Н·м·с/рад: в `go2.xml` "
-        "атрибут joint damping=\"2\" (поле `dof_damping`). Нулевой damping даёт "
-        "лишние колебания и падения до/после удара; 10x зажимает стойку, но "
-        "меняет динамику."
+        "Вернуть демпфирование шарниров ног к штатным примерно 2 Н·м·с/рад: "
+        "в `go2.xml` у суставов ног поле `dof_damping` (атрибут damping). "
+        "Нулевой damping даёт лишние колебания и падения до и после удара. "
+        "Усиление в 10 раз зажимает стойку, но меняет динамику."
     ),
     "floor_contact": (
-        "Не делать пол слишком податливым: `solref` / `solimp` у geom `floor` в "
-        "`scene.xml` и у лап FL/FR/RL/RR в `go2.xml` (у лап `priority=1`, от них "
-        "MuJoCo берёт контакт). Мягкий solref ~0.08 проваливает корпус ещё до Fy; "
-        "для стенда ближе к 0.02 / штатному solimp лап."
+        "Не делать пол слишком податливым. "
+        "Править solref и solimp у пола в scene.xml и у лап FL/FR/RL/RR в go2.xml "
+        "(у лап priority=1, от них MuJoCo берёт контакт). "
+        "Мягкий solref около 0.08 проваливает корпус ещё до удара; "
+        "для стенда ближе к 0.02 и штатному solimp лап."
     ),
     "sensor_noise": (
         "Ограничить шум в измерениях регулятора: фильтровать энкодеры и IMU, "
-        "не добавлять сильный шум в расчёт PD (`obs_noise_q` / `obs_noise_v` в "
-        "`apply_pd`). Средний шум σq = 0.03 уже портит стойку, сильный σq = 0.12 — сильнее."
+        "не добавлять сильный шум в расчёт PD. "
+        "Средний шум 0.03 рад уже портит стойку, сильный 0.12 рад — сильнее."
+    ),
+    "control_hold": (
+        "Не прореживать команды: слать `ctrl` на каждом `mj_step`, без удержания "
+        "старого значения. В `step3_batch_stress.py` это `control_hold` / фактор "
+        "`ctrl_hold`. Обновление раз в 20 шагов (около 25 Гц при dt=0.002) "
+        "делает стойку запаздывающей на ударе; держать один шаг — частоту физики."
+    ),
+    "sensor_bias": (
+        "Калибровать энкодеры и не оставлять постоянное смещение нуля: "
+        "в контуре PD это `obs_bias_q` / дрейф `obs_drift_q`. "
+        "Смещение +0.05 рад на всех суставах уводит стойку, "
+        "нарастающий дрейф ещё сильнее валит до и после удара. "
+        "В железе периодически обнулять офсет энкодеров."
     ),
 }
 
 
 def sweep_level_rate(level: dict) -> float:
     return _as_float(level.get("failure_rate"))
+
+
+def scenario_heading(payload: dict) -> tuple[str, str]:
+    sid = str(payload.get("scenario") or "default")
+    label = str(payload.get("scenario_label") or sid)
+    return sid, label
+
+
+def scenario_blurb(payload: dict) -> str:
+    sid, label = scenario_heading(payload)
+    if sid == "slip_only":
+        return (
+            "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
+            f"сценарий `{sid}` — {label}. Стресс только трение пола, боковой удар выключен (Fy=0)."
+        )
+    if sid == "heavy_impact":
+        return (
+            "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
+            f"сценарий `{sid}` — {label}. Стресс — трение пола и усиленный боковой удар Fy до ±500 Н."
+        )
+    return (
+        "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
+        "стресс — трение пола и боковая сила Fy до ±350 Н на корпус в окне удара."
+    )
 
 
 def format_sweep_sections(payload: dict) -> list[str]:
@@ -406,11 +457,14 @@ def format_sweep_sections(payload: dict) -> list[str]:
         return []
 
     n_ep = _as_int(sweeps.get("n_episodes"), 0)
+    sid = sweeps.get("scenario") or payload.get("scenario") or "default"
+    slabel = sweeps.get("scenario_label") or payload.get("scenario_label") or sid
     lines = [
         "",
         "## One-factor-at-a-time по параметрам",
         "",
-        f"Батч {n_ep} эпизодов на каждый уровень, seed={sweeps.get('seed')}. "
+        f"Батч {n_ep} эпизодов на каждый уровень, seed={sweeps.get('seed')}, "
+        f"сценарий `{sid}` — {slabel}. "
         "Ниже — процент сбоев и прирост относительно нормы (базового уровня).",
         "",
     ]
@@ -463,22 +517,22 @@ def format_sweep_sections(payload: dict) -> list[str]:
         lines.append("")
     for param in parameters:
         pid = str(param.get("id") or "")
-        advice = SWEEP_FIXES.get(pid)
-        if not advice:
-            continue
+        advice = SWEEP_FIXES.get(pid) or (
+            "Смотреть соответствующий параметр модели или контура управления."
+        )
         worst_id = param.get("worst_level")
         worst_label = param.get("worst_label")
         delta = _as_float(param.get("worst_delta_vs_baseline"))
         if delta <= 1e-12:
-            lines.append(
-                f"- **{param.get('name')}**: на этом батче ни один уровень не хуже нормы. {advice}"
-            )
+            head = "на этом батче ни один уровень не хуже нормы."
         else:
-            lines.append(
-                f"- **{param.get('name')}**: хуже всего уровень «{worst_label or worst_id}» "
-                f"({delta * 100:+.1f} п.п.). {advice}"
+            head = (
+                f"хуже всего уровень «{worst_label or worst_id}» "
+                f"({delta * 100:+.1f} п.п.)."
             )
-    lines.append("")
+        lines.append(f"- **{param.get('name')}**: {head}")
+        lines.append(f"  {advice}")
+        lines.append("")
     return lines
 
 
@@ -493,16 +547,24 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
     examples = pick_examples(episodes)
     recs = controller_recommendations(stats)
 
+    sid, slabel = scenario_heading(payload)
+    scenario_note = ""
+    if sid == "slip_only":
+        scenario_note = " Боковой удар выключен: сбои идут от стойки и скольжения, не от Fy."
+    elif sid == "heavy_impact":
+        scenario_note = " Удар сильнее обычного: диапазон Fy до ±500 Н."
+
     lines = [
         "# Диагностика сбоев Go2",
         "",
-        "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, стресс — трение пола и боковая сила Fy на корпус в окне удара.",
+        scenario_blurb(payload),
         "",
         "## Общая статистика",
         "",
         f"- всего прогонов: {n_all}",
         f"- сбоев: {n_fail}" + (f" ({rate * 100:.1f}%)" if isinstance(rate, (int, float)) else ""),
         f"- устояли: {n_survived}",
+        f"- сценарий: `{sid}` — {slabel}.{scenario_note}",
         f"- PD: kp={payload.get('kp')}, kd={payload.get('kd')}",
         f"- окно удара: шаги {_as_int(payload.get('impulse_start'), DEFAULT_IMPULSE_START)}.."
         f"{_as_int(payload.get('impulse_end'), DEFAULT_IMPULSE_END)}",
