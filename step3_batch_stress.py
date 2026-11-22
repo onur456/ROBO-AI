@@ -36,6 +36,17 @@ COM_PROBE_OFFSETS = (
 TORQUE_PROBE_SCALES = (1.0, 0.5, 0.25)
 DELAY_PROBE_STEPS = (0, 5, 15)
 DAMPING_PROBE_SCALES = (1.0, 0.0, 10.0)
+INERTIA_PROBE_SCALES = (1.0, 0.5, 2.0)
+CONTACT_PROBE_VARIANTS = (
+    ("baseline", None, None),
+    ("stiff", (0.002, 1.0), (0.9, 0.99, 0.0001, 0.5, 2.0)),
+    ("soft", (0.08, 0.5), (0.0, 0.9, 0.05, 0.5, 2.0)),
+)
+NOISE_PROBE_VARIANTS = (
+    ("none", 0.0, 0.0),
+    ("medium", 0.03, 0.3),
+    ("strong", 0.12, 1.2),
+)
 PD_MODES = {
     "baseline": {"kp": 25.0, "kd": 1.5},
     "stiff": {"kp": 40.0, "kd": 3.0},
@@ -200,10 +211,20 @@ def apply_pd(
     kp: float = KP,
     kd: float = KD,
     clip_ctrl: bool = False,
+    rng: np.random.Generator | None = None,
+    obs_noise_q: float = 0.0,
+    obs_noise_v: float = 0.0,
 ) -> None:
     if model.nu != len(target_qpos):
         return
-    data.ctrl[:] = kp * (target_qpos - data.qpos[7:]) - kd * data.qvel[6:]
+    q_obs = np.asarray(data.qpos[7:], dtype=float)
+    v_obs = np.asarray(data.qvel[6:], dtype=float)
+    if rng is not None and (obs_noise_q > 0.0 or obs_noise_v > 0.0):
+        if obs_noise_q > 0.0:
+            q_obs = q_obs + rng.normal(0.0, obs_noise_q, size=q_obs.shape)
+        if obs_noise_v > 0.0:
+            v_obs = v_obs + rng.normal(0.0, obs_noise_v, size=v_obs.shape)
+    data.ctrl[:] = kp * (target_qpos - q_obs) - kd * v_obs
     if clip_ctrl:
         np.clip(
             data.ctrl,
@@ -217,6 +238,28 @@ def episode_status(result: dict) -> str:
     if result["fail_step"] is None:
         return "устоял"
     return f"упал на шаге {result['fail_step']}"
+
+
+def z_max_abs_delta(ref: dict, result: dict) -> float:
+    z0 = np.asarray(ref["z"])
+    z1 = np.asarray(result["z"])
+    n = min(len(z0), len(z1))
+    if n == 0:
+        return 0.0
+    return float(np.max(np.abs(z0[:n] - z1[:n])))
+
+
+def print_probe_line(result: dict, extra: str = "", ref: dict | None = None) -> None:
+    dz = ""
+    if ref is not None and result is not ref:
+        delta = z_max_abs_delta(ref, result)
+        result["dz_vs_ref"] = delta
+        dz = f"  max|Δz| vs {ref['label']}={delta:.6f}"
+    prefix = f"{extra} " if extra else ""
+    print(
+        f"  {result['label']}: {prefix}{episode_status(result)}, "
+        f"z_end={result['z_end']:.4f}, z_min={result['z_min']:.4f}{dz}"
+    )
 
 
 def print_z_deltas(results: list[dict], label_key: str, ref_idx: int = 0) -> bool:
@@ -259,6 +302,49 @@ def write_dof_damping(model: mujoco.MjModel, damping: np.ndarray) -> np.ndarray:
     if float(np.max(np.abs(written - np.asarray(damping, dtype=float)))) > 1e-12:
         raise RuntimeError("не удалось записать dof_damping")
     return written
+
+
+def read_body_inertia(model: mujoco.MjModel, body_id: int) -> np.ndarray:
+    return np.array(model.body_inertia[body_id], copy=True)
+
+
+def write_body_inertia(
+    model: mujoco.MjModel, data: mujoco.MjData, body_id: int, inertia: np.ndarray
+) -> np.ndarray:
+    model.body_inertia[body_id] = inertia
+    written = read_body_inertia(model, body_id)
+    if float(np.max(np.abs(written - np.asarray(inertia, dtype=float)))) > 1e-12:
+        raise RuntimeError(
+            f"не удалось записать body_inertia[{body_id}]={np.asarray(inertia).tolist()}, "
+            f"сейчас {written.tolist()}"
+        )
+    mujoco.mj_setConst(model, data)
+    return written
+
+
+def read_geom_contact(
+    model: mujoco.MjModel, geom_ids: list[int]
+) -> tuple[np.ndarray, np.ndarray]:
+    solref = np.array([model.geom_solref[gid] for gid in geom_ids], copy=True)
+    solimp = np.array([model.geom_solimp[gid] for gid in geom_ids], copy=True)
+    return solref, solimp
+
+
+def write_geom_contact(
+    model: mujoco.MjModel,
+    geom_ids: list[int],
+    solref: np.ndarray,
+    solimp: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    for i, geom_id in enumerate(geom_ids):
+        model.geom_solref[geom_id] = solref[i]
+        model.geom_solimp[geom_id] = solimp[i]
+    written_ref, written_imp = read_geom_contact(model, geom_ids)
+    if float(np.max(np.abs(written_ref - solref))) > 1e-12:
+        raise RuntimeError("не удалось записать geom_solref")
+    if float(np.max(np.abs(written_imp - solimp))) > 1e-12:
+        raise RuntimeError("не удалось записать geom_solimp")
+    return written_ref, written_imp
 
 
 def snapshot(step: int, data: mujoco.MjData, z: float) -> dict:
@@ -305,6 +391,9 @@ def run_controlled_episode(
     kd: float = KD,
     clip_ctrl: bool = False,
     action_delay: int = 0,
+    obs_noise_q: float = 0.0,
+    obs_noise_v: float = 0.0,
+    noise_seed: int | None = None,
 ) -> dict:
     reset_to_stance(model, data)
     set_sliding_friction(model, friction_geoms, friction)
@@ -326,8 +415,21 @@ def run_controlled_episode(
     ctrl_buf: deque[np.ndarray] = deque(maxlen=delay + 1)
     limits = np.array(model.actuator_ctrlrange, copy=True)
     limit_abs = np.maximum(np.abs(limits[:, 0]), np.abs(limits[:, 1]))
+    obs_rng = None
+    if obs_noise_q > 0.0 or obs_noise_v > 0.0:
+        obs_rng = np.random.default_rng(SEED if noise_seed is None else noise_seed)
     for step in range(1, MAX_STEPS + 1):
-        apply_pd(model, data, target_qpos, kp=kp, kd=kd, clip_ctrl=False)
+        apply_pd(
+            model,
+            data,
+            target_qpos,
+            kp=kp,
+            kd=kd,
+            clip_ctrl=False,
+            rng=obs_rng,
+            obs_noise_q=obs_noise_q,
+            obs_noise_v=obs_noise_v,
+        )
         desired = np.array(data.ctrl, copy=True)
         ctrl_buf.append(desired)
         raw = np.array(ctrl_buf[0], copy=True)
@@ -661,6 +763,164 @@ def probe_joint_damping(
         print("  траектории различаются, демпфирование суставов влияет на устойчивость")
 
 
+def probe_body_inertia(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    kp: float,
+    kd: float,
+) -> None:
+    origin = read_body_inertia(model, torso_body_id)
+    print(
+        f"\nпроверка инерции корпуса (#8): body_id={torso_body_id} "
+        f"body_inertia0={origin.tolist()}  μ={COM_PROBE_FRICTION:g} "
+        f"Fy={COM_PROBE_FORCE:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}"
+    )
+    results: list[dict] = []
+    try:
+        for scale in INERTIA_PROBE_SCALES:
+            written = write_body_inertia(model, data, torso_body_id, origin * scale)
+            result = run_controlled_episode(
+                model,
+                data,
+                target_qpos,
+                friction_geoms,
+                COM_PROBE_FRICTION,
+                COM_PROBE_FORCE,
+                torso_body_id,
+                kp=kp,
+                kd=kd,
+            )
+            result["label"] = f"{scale:g}x"
+            results.append(result)
+            print_probe_line(
+                result,
+                extra=f"inertia={np.round(written, 5).tolist()}",
+                ref=results[0],
+            )
+    finally:
+        restored = write_body_inertia(model, data, torso_body_id, origin)
+        if float(np.max(np.abs(restored - origin))) > 1e-12:
+            raise RuntimeError("не удалось восстановить body_inertia")
+        print(f"  body_inertia восстановлена: {restored.tolist()}")
+
+    any_diff = print_z_deltas(results, "label")
+    if not any_diff:
+        print("  предупреждение: траектории совпали, инерция корпуса не влияет")
+    else:
+        print("  траектории различаются, инерция корпуса влияет на устойчивость")
+
+
+def probe_floor_contact(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    kp: float,
+    kd: float,
+) -> None:
+    origin_ref, origin_imp = read_geom_contact(model, friction_geoms)
+    print(
+        f"\nпроверка контакта пола (#9): geom_ids={friction_geoms} "
+        f"solref0={origin_ref[0].tolist()} solimp0={origin_imp[0].tolist()}  "
+        f"μ={COM_PROBE_FRICTION:g} Fy={COM_PROBE_FORCE:.1f} Н "
+        f"на шагах {IMPULSE_START}..{IMPULSE_END}"
+    )
+    results: list[dict] = []
+    try:
+        for label, solref, solimp in CONTACT_PROBE_VARIANTS:
+            if solref is None:
+                ref_mat, imp_mat = origin_ref, origin_imp
+            else:
+                ref_mat = np.tile(np.asarray(solref, dtype=float), (len(friction_geoms), 1))
+                imp_mat = np.tile(np.asarray(solimp, dtype=float), (len(friction_geoms), 1))
+            written_ref, written_imp = write_geom_contact(
+                model, friction_geoms, ref_mat, imp_mat
+            )
+            result = run_controlled_episode(
+                model,
+                data,
+                target_qpos,
+                friction_geoms,
+                COM_PROBE_FRICTION,
+                COM_PROBE_FORCE,
+                torso_body_id,
+                kp=kp,
+                kd=kd,
+            )
+            result["label"] = label
+            results.append(result)
+            print_probe_line(
+                result,
+                extra=(
+                    f"solref={written_ref[0].tolist()} "
+                    f"solimp={written_imp[0].tolist()}"
+                ),
+                ref=results[0],
+            )
+    finally:
+        restored_ref, restored_imp = write_geom_contact(
+            model, friction_geoms, origin_ref, origin_imp
+        )
+        print(
+            f"  контакт восстановлен: solref={restored_ref[0].tolist()} "
+            f"solimp={restored_imp[0].tolist()}"
+        )
+
+    any_diff = print_z_deltas(results, "label")
+    if not any_diff:
+        print("  предупреждение: траектории совпали, мягкость контакта не влияет")
+    else:
+        print("  траектории различаются, мягкость контакта влияет на устойчивость")
+
+
+def probe_observation_noise(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    kp: float,
+    kd: float,
+) -> None:
+    print(
+        f"\nпроверка шума измерений (#10): μ={COM_PROBE_FRICTION:g} "
+        f"Fy={COM_PROBE_FORCE:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}  "
+        f"seed={SEED}"
+    )
+    results: list[dict] = []
+    for label, noise_q, noise_v in NOISE_PROBE_VARIANTS:
+        result = run_controlled_episode(
+            model,
+            data,
+            target_qpos,
+            friction_geoms,
+            COM_PROBE_FRICTION,
+            COM_PROBE_FORCE,
+            torso_body_id,
+            kp=kp,
+            kd=kd,
+            obs_noise_q=noise_q,
+            obs_noise_v=noise_v,
+            noise_seed=SEED,
+        )
+        result["label"] = label
+        results.append(result)
+        print_probe_line(
+            result,
+            extra=f"σq={noise_q:g} σv={noise_v:g}",
+            ref=results[0],
+        )
+    any_diff = print_z_deltas(results, "label")
+    if not any_diff:
+        print("  предупреждение: траектории совпали, шум измерений не влияет")
+    else:
+        print("  траектории различаются, шум измерений влияет на устойчивость")
+
+
 def probe_stance_hold(
     model: mujoco.MjModel,
     data: mujoco.MjData,
@@ -933,6 +1193,15 @@ def main() -> None:
         model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
     )
     probe_joint_damping(
+        model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
+    )
+    probe_body_inertia(
+        model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
+    )
+    probe_floor_contact(
+        model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
+    )
+    probe_observation_noise(
         model, data, target_qpos, friction_geoms, torso_body_id, kp=main_kp, kd=main_kd
     )
 
