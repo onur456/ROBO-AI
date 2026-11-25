@@ -1,0 +1,8 @@
+numpy==2.4.6
+mujoco==4.0.1
+pandas==3.1.1
+plotly==7.2.0
+statsmodels==0.15.0
+streamlit==1.67.0
+# необязательный вызов Gemini в step4_ai_diagnose.py; в текущем окружении пакет не установлен
+google-genai
