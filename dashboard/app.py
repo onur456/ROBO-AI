@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from paired_compare import compare_runs
 from step3_batch_stress import wilson_ci
 
 DEFAULT_PATH = "reports/batch_failures.json"
@@ -246,15 +247,12 @@ def render_episode(frame: pd.DataFrame) -> None:
     )
 
 
-def main() -> None:
-    st.set_page_config(page_title="Robo AI — Stress Test Dashboard", layout="wide")
-    st.title("Robo AI — Stress Test Dashboard")
-
+def render_batch_tab() -> None:
     filepath = st.sidebar.text_input("Путь к JSON", value=DEFAULT_PATH)
     path = resolve_path(filepath)
     if not path.is_file():
         st.error(f"Файл не найден: {path}")
-        st.stop()
+        return
 
     frame = load_data(filepath)
     param_options = sorted(frame["param_id"].dropna().astype(str).unique())
@@ -275,6 +273,76 @@ def main() -> None:
     render_episode(filtered)
     st.caption(f"{len(filtered)} из {len(frame)} эпизодов")
     st.dataframe(filtered, use_container_width=True)
+
+
+def _load_json(path: Path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def comparison_table(result: dict) -> pd.DataFrame:
+    rows = []
+    for row in result.get("rows") or []:
+        delta = row.get("delta_pp")
+        delta_txt = None if delta is None or delta != delta else round(float(delta), 1)
+        rows.append(
+            {
+                "сценарий": row.get("scenario"),
+                "параметр": row.get("param"),
+                "уровень": row.get("label") or row.get("level"),
+                "общие seed": row.get("n_shared"),
+                "0->1 хуже": row.get("n_0_to_1"),
+                "1->0 лучше": row.get("n_1_to_0"),
+                "Δ, п.п.": delta_txt,
+                "p_mcnemar": row.get("p_mcnemar"),
+                "p_holm": row.get("p_holm"),
+                "вердикт": row.get("direction"),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def render_compare_tab() -> None:
+    st.subheader("Сравнение A/B")
+    path_a = st.text_input("Файл А (До)", value="", key="compare_a")
+    path_b = st.text_input("Файл Б (После)", value="", key="compare_b")
+    if not path_a.strip() or not path_b.strip():
+        st.info("Укажите пути к двум JSON: файл А (до) и файл Б (после).")
+        return
+
+    file_a = resolve_path(path_a.strip())
+    file_b = resolve_path(path_b.strip())
+    missing = [str(path) for path in (file_a, file_b) if not path.is_file()]
+    if missing:
+        st.error("Файл не найден: " + "; ".join(missing))
+        return
+    try:
+        result = compare_runs(_load_json(file_a), _load_json(file_b))
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        st.error(f"Не удалось сравнить файлы: {exc}")
+        return
+
+    shown: list[str] = []
+    for note in result.get("warnings") or []:
+        if note in shown:
+            continue
+        shown.append(note)
+        st.warning(note)
+
+    table = comparison_table(result)
+    if table.empty:
+        st.info("Сопоставимых уровней нет.")
+        return
+    st.dataframe(table, use_container_width=True)
+
+
+def main() -> None:
+    st.set_page_config(page_title="Robo AI — Stress Test Dashboard", layout="wide")
+    st.title("Robo AI — Stress Test Dashboard")
+    tab_batch, tab_compare = st.tabs(["Анализ батча", "Сравнение A/B"])
+    with tab_batch:
+        render_batch_tab()
+    with tab_compare:
+        render_compare_tab()
 
 
 if __name__ == "__main__":
