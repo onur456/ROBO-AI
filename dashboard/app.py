@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -27,6 +28,14 @@ OUTCOME_COLUMNS = [
     "fail_stance_loss",
     "fail_reason",
 ]
+
+
+def cli_report_path() -> str:
+    """Путь из `streamlit run dashboard/app.py -- --report ...`."""
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--report", default=DEFAULT_PATH)
+    args, _unknown = parser.parse_known_args()
+    return str(args.report)
 
 
 def resolve_path(filepath: str) -> Path:
@@ -248,7 +257,7 @@ def render_episode(frame: pd.DataFrame) -> None:
 
 
 def render_batch_tab() -> None:
-    filepath = st.sidebar.text_input("Путь к JSON", value=DEFAULT_PATH)
+    filepath = st.sidebar.text_input("Путь к JSON", value=cli_report_path())
     path = resolve_path(filepath)
     if not path.is_file():
         st.error(f"Файл не найден: {path}")
