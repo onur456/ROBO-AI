@@ -13,6 +13,9 @@ from pathlib import Path
 import numpy as np
 import mujoco
 
+import controllers
+from controllers import JointPDController, make_controller, prepare_controller_spec
+
 MODEL_PATH = r"C:\Users\HP\Desktop\mujoco_menagerie-main\mujoco_menagerie-main\unitree_go2\scene.xml"
 N_ENVS = 80
 N_EPISODES = N_ENVS
@@ -24,6 +27,16 @@ SAG_Z = 0.20
 CONTACT_Z = 0.12
 TILT_FAIL_RAD = math.radians(45.0)
 STANCE_LOSS_FRAC = 0.85
+DEGRADATION_FRAC = 0.03
+POST_IMPACT_MEASURE_S = 0.40
+N_THRESHOLD_EPISODES = 200
+FY_CRIT_N_EPISODES = 30
+FY_CRIT_ITERS = 8
+FY_CRIT_LO = 0.0
+FY_CRIT_HI = 400.0
+FY_CRIT_BOOTSTRAP = 500
+IMPULSE_HEIGHT_JITTER_M = 0.03
+IMPULSE_DURATION_JITTER = 0.20
 UPRIGHT_HOLD_S = 0.20
 SETTLE_TILT_RAD = math.radians(15.0)
 SETTLE_SPEED = 0.15
@@ -61,6 +74,15 @@ MU02_Z_SVG_PATH = Path("reports") / "mu02_z.svg"
 MU02_ROLL_SVG_PATH = Path("reports") / "mu02_roll.svg"
 SAG_CSV_PATH = Path("reports") / "sag_compare.csv"
 SAG_JSON_PATH = Path("reports") / "sag_compare.json"
+THRESHOLDS_PATH = Path("reports") / "outcome_thresholds.json"
+CRITERIA_SVG_PATH = Path("reports") / "criteria_sensitivity.svg"
+ICE_TRACE_DIR = Path("reports")
+FYCRIT_PATH = Path("reports") / "fy_crit_ofat.json"
+TORQUE_TEST_PATH = Path("reports") / "torque_limit_test.json"
+N_TORQUE_EPISODES = 100
+TORQUE_TEST_SCALES = (1.0, 0.5, 0.25, 0.05)
+LIMIT_INACTIVE_NOTE = "лимит не достигнут / не влияет на данном уровне"
+LIMIT_ACTIVE_NOTE = "насыщение активно"
 SCENARIOS = {
     "default": {
         "id": "default",
@@ -116,7 +138,7 @@ COM_PROBE_OFFSETS = (
     ("only_dZ", (0.0, 0.0, 0.03)),
     ("dY+dZ", (0.0, 0.04, 0.03)),
 )
-TORQUE_PROBE_SCALES = (1.0, 0.5, 0.25)
+TORQUE_PROBE_SCALES = (1.0, 0.5, 0.25, 0.05)
 DELAY_PROBE_STEPS = (0, 5, 15)
 DAMPING_PROBE_SCALES = (1.0, 0.0, 10.0)
 INERTIA_PROBE_SCALES = (1.0, 0.5, 2.0)
@@ -395,7 +417,21 @@ PD_MODES = {
     "weak_pd": {"kp": 25.0, "kd": 1.5},
 }
 MAIN_MODE = "baseline"
+ACTIVE_CONTROLLER = "pd"
 STANCE_REF = {"z": None, "frac": STANCE_LOSS_FRAC, "kp": None, "kd": None}
+STANCE_THRESH = {
+    "z_threshold": None,
+    "slip_threshold": None,
+    "z_ref": None,
+    "degradation_frac": DEGRADATION_FRAC,
+    "n": 0,
+    "derivation": None,
+}
+IMPULSE_CFG = {
+    "realistic": False,
+    "height_jitter_m": IMPULSE_HEIGHT_JITTER_M,
+    "duration_jitter": IMPULSE_DURATION_JITTER,
+}
 KP = PD_MODES[MAIN_MODE]["kp"]
 KD = PD_MODES[MAIN_MODE]["kd"]
 REPORT_PATH = Path("reports") / "batch_failures.json"
@@ -416,7 +452,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch stress for Go2 PD stance")
     parser.add_argument(
         "--mode",
-        choices=("full", "quick", "ofat", "grid", "sag", "ff"),
+        choices=("full", "quick", "ofat", "grid", "sag", "ff", "criteria", "fycrit", "pd_ff", "torque"),
         default="full",
         help=(
             "full: единичные проверки, сравнение PD, OFAT и основной батч; "
@@ -424,7 +460,11 @@ def parse_args() -> argparse.Namespace:
             "ofat: OFAT на nominal (контроль) и moderate (чувствительность); "
             "grid: стойка, сетка Fy/μ, обрыв и траектории μ=0.2 (не трогает batch_failures.json); "
             "sag: сравнение вариантов стойки; "
-            "ff: диагностика gravity feed-forward"
+            "ff: диагностика gravity feed-forward; "
+            "criteria: пороги 3σ, чувствительность, лёд; "
+            "fycrit: OFAT в терминах Fy_crit; "
+            "pd_ff: вариант PD+контактный FF, базу не меняет; "
+            "torque: проверка torque_limit 100/50/25/5%%"
         ),
     )
     parser.add_argument(
@@ -450,6 +490,45 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=STANCE_LOSS_FRAC,
         help="stance_loss: z после успокоения < frac * высота эталонной стойки (по умолчанию 0.85)",
+    )
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        default=300,
+        help="число эпизодов на уровень OFAT и в основном батче (по умолчанию 300)",
+    )
+    parser.add_argument(
+        "--controller",
+        default=ACTIVE_CONTROLLER,
+        help=(
+            "сменный контроллер: pd (kp/kd из --pd: baseline, stiff, weak_pd); "
+            "stance_shift (тот же PD, сдвиг цели 0.2 рад); "
+            "внешний путь.py:КлассИлиФункция или модуль:Атрибут. "
+            "Функция вызывается как compute(obs, step, dt, target_qpos). "
+            "Класс создаётся с kp и kd, если принимает их"
+        ),
+    )
+    parser.add_argument(
+        "--compare",
+        nargs=2,
+        metavar=("BEFORE", "AFTER"),
+        help=(
+            "парное сравнение двух JSON по общим seed: A до, B после. "
+            "Считает Уилсона, Макнемара и Холма и выходит, не запуская симуляцию"
+        ),
+    )
+    parser.add_argument(
+        "--compare-out",
+        default="reports/paired_compare.json",
+        help="JSON парного сравнения. batch_failures.json и final_diagnosis.md не используются",
+    )
+    parser.add_argument(
+        "--report",
+        default=None,
+        help=(
+            "куда писать JSON батча. Без флага остаётся reports/batch_failures.json. "
+            "Новый путь не сливается с основным отчётом"
+        ),
     )
     return parser.parse_args()
 
@@ -488,10 +567,18 @@ def apply_torso_impulse(
     force: float,
     impulse_start: int = IMPULSE_START,
     impulse_end: int = IMPULSE_END,
+    force_x: float | None = None,
+    height_offset: float = 0.0,
 ) -> None:
     data.xfrc_applied[torso_body_id] = 0.0
-    if impulse_start <= step <= impulse_end:
-        data.xfrc_applied[torso_body_id, 1] = force
+    if not (impulse_start <= step <= impulse_end):
+        return
+    fy = float(force)
+    fx = 0.0 if force_x is None else float(force_x)
+    data.xfrc_applied[torso_body_id, 0] = fx
+    data.xfrc_applied[torso_body_id, 1] = fy
+    data.xfrc_applied[torso_body_id, 3] = float(height_offset) * fy
+    data.xfrc_applied[torso_body_id, 4] = -float(height_offset) * fx
 
 
 def impact_phase(
@@ -517,6 +604,70 @@ def wilson_ci(k: int, n: int, z: float = 1.959963984540054) -> tuple[float, floa
     return (max(0.0, center - half), min(1.0, center + half))
 
 
+def outcome_record(ep: dict) -> dict:
+    return {
+        "episode": int(ep["episode"]),
+        "seed": int(ep.get("seed") if ep.get("seed") is not None else episode_seed(int(ep["episode"]))),
+        "failed": bool(ep.get("failed")),
+        "fail_fall": bool(ep.get("fail_fall") or ep.get("fail_tilt")),
+        "fail_stance_loss": bool(ep.get("fail_stance_loss")),
+        "fail_reason": ep.get("fail_reason"),
+    }
+
+
+def mcnemar_exact_paired(base_outcomes: list[dict], treat_outcomes: list[dict]) -> dict:
+    """Точный Макнемар на парных бинарных исходах (одинаковые episode/seed)."""
+    from statsmodels.stats.contingency_tables import mcnemar
+
+    base_by = {int(o["episode"]): bool(o["failed"]) for o in base_outcomes}
+    treat_by = {int(o["episode"]): bool(o["failed"]) for o in treat_outcomes}
+    keys = sorted(set(base_by) & set(treat_by))
+    n00 = n01 = n10 = n11 = 0
+    for key in keys:
+        b = base_by[key]
+        t = treat_by[key]
+        if b and t:
+            n11 += 1
+        elif b and not t:
+            n01 += 1
+        elif (not b) and t:
+            n10 += 1
+        else:
+            n00 += 1
+    table = np.array([[n00, n01], [n10, n11]], dtype=int)
+    n_disc = n01 + n10
+    if n_disc == 0 or len(keys) == 0:
+        pvalue = 1.0
+    else:
+        pvalue = float(mcnemar(table, exact=True).pvalue)
+    return {
+        "test": "mcnemar_exact",
+        "n_paired": len(keys),
+        "n00": n00,
+        "n01": n01,
+        "n10": n10,
+        "n11": n11,
+        "n_discordant": n_disc,
+        "pvalue": pvalue,
+    }
+
+
+def holm_adjust(pvalues: list[float], alpha: float = 0.05) -> tuple[list[float], list[bool]]:
+    from statsmodels.stats.multitest import multipletests
+
+    if not pvalues:
+        return [], []
+    reject, p_adj, _, _ = multipletests(pvalues, alpha=alpha, method="holm")
+    return [float(p) for p in p_adj], [bool(r) for r in reject]
+
+
+HOLM_FAMILY_NOTE = (
+    "поправка Холма по всем p-значениям точного Макнемара в этом сценарии: "
+    "каждый ненулевой уровень каждого фактора против baseline своего фактора "
+    "(парные эпизоды с общим seed/индексом)"
+)
+
+
 def episode_seed(episode: int) -> int:
     return int(SEED) * 1_000_003 + int(episode)
 
@@ -524,12 +675,43 @@ def episode_seed(episode: int) -> int:
 def sample_episode_perturbation(episode: int, n_joints: int) -> dict:
     rng = np.random.default_rng(episode_seed(episode))
     shift = int(rng.integers(-IMPULSE_JITTER_STEPS, IMPULSE_JITTER_STEPS + 1))
+    base_dur = IMPULSE_END - IMPULSE_START
+    realistic = bool(IMPULSE_CFG.get("realistic"))
+    if realistic:
+        ang = float(rng.uniform(0.0, 2.0 * math.pi))
+        dir_x = math.cos(ang)
+        dir_y = math.sin(ang)
+        height = float(
+            rng.uniform(
+                -float(IMPULSE_CFG["height_jitter_m"]),
+                float(IMPULSE_CFG["height_jitter_m"]),
+            )
+        )
+        dur_scale = 1.0 + float(
+            rng.uniform(
+                -float(IMPULSE_CFG["duration_jitter"]),
+                float(IMPULSE_CFG["duration_jitter"]),
+            )
+        )
+        duration = max(1, int(round(base_dur * dur_scale)))
+        start = IMPULSE_START + shift
+        end = start + duration
+    else:
+        dir_x = 0.0
+        dir_y = 1.0
+        height = 0.0
+        start = IMPULSE_START + shift
+        end = IMPULSE_END + shift
     return {
         "seed": episode_seed(episode),
         "joint_jitter": rng.uniform(-JOINT_JITTER_RAD, JOINT_JITTER_RAD, size=n_joints),
-        "impulse_start": IMPULSE_START + shift,
-        "impulse_end": IMPULSE_END + shift,
+        "impulse_start": int(start),
+        "impulse_end": int(end),
         "mass_scale": 1.0 + float(rng.uniform(-MASS_JITTER, MASS_JITTER)),
+        "impulse_dir_x": dir_x,
+        "impulse_dir_y": dir_y,
+        "impulse_height": height,
+        "impulse_realistic": realistic,
     }
 
 
@@ -773,6 +955,31 @@ def write_ctrlrange(model: mujoco.MjModel, ctrlrange: np.ndarray) -> np.ndarray:
     return written
 
 
+STOCK_CTRLRANGE: dict[str, np.ndarray | None] = {"value": None}
+
+
+def stock_ctrlrange(model: mujoco.MjModel) -> np.ndarray:
+    if STOCK_CTRLRANGE["value"] is None:
+        STOCK_CTRLRANGE["value"] = read_ctrlrange(model)
+    return np.array(STOCK_CTRLRANGE["value"], copy=True)
+
+
+def apply_torque_limit(model: mujoco.MjModel, scale: float) -> np.ndarray:
+    written = write_ctrlrange(model, stock_ctrlrange(model) * float(scale))
+    model.actuator_ctrllimited[:] = True
+    return written
+
+
+def actuator_dof_gears(model: mujoco.MjModel) -> tuple[np.ndarray, np.ndarray]:
+    dofs = np.empty(model.nu, dtype=int)
+    gears = np.empty(model.nu, dtype=float)
+    for i in range(model.nu):
+        jid = int(model.actuator_trnid[i, 0])
+        dofs[i] = int(model.jnt_dofadr[jid])
+        gears[i] = float(model.actuator_gear[i, 0])
+    return dofs, gears
+
+
 def actuator_joint_rows(model: mujoco.MjModel) -> list[dict]:
     rows: list[dict] = []
     for i in range(model.nu):
@@ -810,6 +1017,63 @@ def add_legacy_gravity_ff(model: mujoco.MjModel, data: mujoco.MjData) -> None:
     data.ctrl[:] += np.asarray(data.qfrc_bias[6 : 6 + model.nu], dtype=float)
 
 
+def joint_observation(
+    data: mujoco.MjData,
+    rng: np.random.Generator | None,
+    noise_q: float,
+    noise_v: float,
+    bias_q: float,
+) -> dict:
+    """Наблюдение суставов. Шум и смещение одинаковы для любого контроллера."""
+    q_obs = np.asarray(data.qpos[7:], dtype=float)
+    v_obs = np.asarray(data.qvel[6:], dtype=float)
+    if rng is not None and (noise_q > 0.0 or noise_v > 0.0):
+        if noise_q > 0.0:
+            q_obs = q_obs + rng.normal(0.0, noise_q, size=q_obs.shape)
+        if noise_v > 0.0:
+            v_obs = v_obs + rng.normal(0.0, noise_v, size=v_obs.shape)
+    if abs(bias_q) > 0.0:
+        q_obs = q_obs + bias_q
+    return {"q": q_obs, "v": v_obs, "time": float(data.time)}
+
+
+def command_from_controller(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    controller,
+    target_qpos: np.ndarray,
+    step: int,
+    dt: float,
+    rng: np.random.Generator | None,
+    noise_q: float,
+    noise_v: float,
+    bias_q: float,
+    gravity_ff: bool = False,
+    ff_ctrl: np.ndarray | None = None,
+) -> np.ndarray:
+    obs = joint_observation(data, rng, noise_q, noise_v, bias_q)
+    label = getattr(controller, "name", None) or type(controller).__name__
+    raw_cmd = controller.act(obs, step, dt, target_qpos)
+    try:
+        cmd = np.asarray(raw_cmd, dtype=float).reshape(-1)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"контроллер {label!r} не вернул числовой вектор управления: {exc}"
+        ) from exc
+    n_act = int(model.nu)
+    if cmd.size != n_act or not np.all(np.isfinite(cmd)):
+        raise ValueError(
+            f"контроллер {label!r} вернул команду длины {int(cmd.size)} "
+            f"(ожидается {n_act} конечных чисел)"
+        )
+    data.ctrl[:] = cmd
+    if gravity_ff:
+        add_mapped_gravity_ff(model, data)
+    if ff_ctrl is not None:
+        data.ctrl[:] = np.asarray(data.ctrl, dtype=float) + np.asarray(ff_ctrl, dtype=float)
+    return np.array(data.ctrl, copy=True)
+
+
 def apply_pd(
     model: mujoco.MjModel,
     data: mujoco.MjData,
@@ -826,20 +1090,20 @@ def apply_pd(
 ) -> None:
     if model.nu != len(target_qpos):
         return
-    q_obs = np.asarray(data.qpos[7:], dtype=float)
-    v_obs = np.asarray(data.qvel[6:], dtype=float)
-    if rng is not None and (obs_noise_q > 0.0 or obs_noise_v > 0.0):
-        if obs_noise_q > 0.0:
-            q_obs = q_obs + rng.normal(0.0, obs_noise_q, size=q_obs.shape)
-        if obs_noise_v > 0.0:
-            v_obs = v_obs + rng.normal(0.0, obs_noise_v, size=v_obs.shape)
-    if abs(obs_bias_q) > 0.0:
-        q_obs = q_obs + obs_bias_q
-    data.ctrl[:] = kp * (target_qpos - q_obs) - kd * v_obs
-    if gravity_ff:
-        add_mapped_gravity_ff(model, data)
-    if ff_ctrl is not None:
-        data.ctrl[:] += np.asarray(ff_ctrl, dtype=float)
+    command_from_controller(
+        model,
+        data,
+        JointPDController(kp, kd, name="pd"),
+        target_qpos,
+        0,
+        float(model.opt.timestep),
+        rng,
+        obs_noise_q,
+        obs_noise_v,
+        obs_bias_q,
+        gravity_ff=gravity_ff,
+        ff_ctrl=ff_ctrl,
+    )
     if clip_ctrl:
         np.clip(
             data.ctrl,
@@ -850,9 +1114,38 @@ def apply_pd(
 
 
 def episode_status(result: dict) -> str:
-    if result["fail_step"] is None:
+    if not result.get("failed") and result.get("fail_step") is None:
         return "устоял"
-    return f"упал на шаге {result['fail_step']}"
+    step = result.get("fail_step")
+    kind = result.get("fall_kind")
+    z_end = result.get("z_end")
+    body_up = z_end is not None and float(z_end) > CONTACT_Z + 0.02
+    if result.get("fail_fall") or kind in ("tilt", "contact_z", "upright_hold"):
+        if kind == "contact_z":
+            return f"падение (касание корпусом) на шаге {step}"
+        if kind in ("tilt", "upright_hold") or body_up:
+            return f"опрокидывание (tilt) на шаге {step}"
+        return f"fall на шаге {step}"
+    if result.get("fail_stance_loss"):
+        return f"stance_loss на шаге {step}"
+    if step is not None:
+        return f"сбой на шаге {step}"
+    return "устоял"
+
+
+def saturation_note(sat: float | None) -> str:
+    if sat is None or float(sat) <= 1e-12:
+        return LIMIT_INACTIVE_NOTE
+    return LIMIT_ACTIVE_NOTE
+
+
+def format_sat_pct(sat: float | None) -> str:
+    if sat is None or float(sat) <= 1e-12:
+        return "0.0%"
+    pct = float(sat) * 100.0
+    if pct < 0.05:
+        return f"{pct:.3f}%"
+    return f"{pct:.1f}%"
 
 
 def z_max_abs_delta(ref: dict, result: dict) -> float:
@@ -994,9 +1287,7 @@ def apply_model_factor(
         write_geom_contact(model, friction_geoms, solref, solimp)
         return
     if kind == "torque_limit":
-        origin = read_ctrlrange(model)
-        scale = float(factor.get("scale", 1.0))
-        write_ctrlrange(model, origin * scale)
+        apply_torque_limit(model, float(factor.get("scale", 1.0)))
 
 
 def control_from_factor(factor: dict | None) -> dict:
@@ -1099,6 +1390,8 @@ def simulate_episode(
     stance_ref_z: float | None = None,
     stance_loss_frac: float | None = None,
     foot_ids: list[int] | None = None,
+    controller=None,
+    controller_name: str | None = None,
 ) -> dict:
     cfg = control_from_factor(factor)
     delay = max(0, int(cfg["delay"]))
@@ -1118,6 +1411,10 @@ def simulate_episode(
             "impulse_start": IMPULSE_START,
             "impulse_end": IMPULSE_END,
             "mass_scale": 1.0,
+            "impulse_dir_x": 0.0,
+            "impulse_dir_y": 1.0,
+            "impulse_height": 0.0,
+            "impulse_realistic": False,
         }
     )
     impulse_start = int(pert["impulse_start"])
@@ -1145,7 +1442,11 @@ def simulate_episode(
         z_start = float(data.qpos[2])
         key_ctrl = np.array(data.ctrl, copy=True)
         feet = list(foot_ids) if foot_ids else find_foot_geom_ids(model)
-        foot_xy0 = {gid: np.array(data.geom_xpos[gid][:2], copy=True) for gid in feet}
+        body_xy0 = np.array(data.qpos[:2], dtype=float)
+        foot_rel0 = {
+            gid: np.array(data.geom_xpos[gid][:2], dtype=float) - body_xy0
+            for gid in feet
+        }
         contact_friction = None
         if data.ncon > 0:
             contact_friction = np.asarray(data.contact[0].friction, dtype=float).tolist()
@@ -1155,6 +1456,7 @@ def simulate_episode(
         last_desired: np.ndarray | None = None
         limits = np.array(model.actuator_ctrlrange, copy=True)
         limit_abs = np.maximum(np.abs(limits[:, 0]), np.abs(limits[:, 1]))
+        act_dofs, act_gears = actuator_dof_gears(model)
         obs_rng = (
             np.random.default_rng(int(pert["seed"]))
             if noise_q > 0.0 or noise_v > 0.0
@@ -1171,6 +1473,8 @@ def simulate_episode(
         max_abs_ctrl = 0.0
         max_abs_ctrl_raw = 0.0
         max_util_raw = 0.0
+        max_tau_over_limit = 0.0
+        sat_steps = 0
         hit_limit = False
         min_z = z_start
         max_abs_roll = 0.0
@@ -1183,49 +1487,80 @@ def simulate_episode(
         pre_impact_z = z_start
         applied_ff = np.array(key_ctrl, copy=True) if keyframe_ff else ff_ctrl
         foot_slip_max = 0.0
-        z_ref = STANCE_REF["z"] if stance_ref_z is None else stance_ref_z
+        foot_slip_world_max = 0.0
+        z_ref = STANCE_THRESH.get("z_ref") or STANCE_REF["z"] if stance_ref_z is None else stance_ref_z
+        if stance_ref_z is not None:
+            z_ref = stance_ref_z
         loss_frac = STANCE_LOSS_FRAC if stance_loss_frac is None else float(stance_loss_frac)
         settle_window = max(1, int(math.ceil(UPRIGHT_HOLD_S / max(dt, 1e-9))))
+        measure_step = impulse_end + max(1, int(round(POST_IMPACT_MEASURE_S / max(dt, 1e-9))))
+        z_settle = None
+        foot_slip_at_measure = None
+        body_speed_at_measure = None
+        roll_at_measure = None
+        foot_rel_trace: list[list[float]] = []
+        speed_trace: list[float] = []
+        mag = abs(float(lateral_force))
+        if pert.get("impulse_realistic"):
+            force_x = mag * float(pert.get("impulse_dir_x") or 0.0)
+            force_y = mag * float(pert.get("impulse_dir_y") or 1.0)
+        else:
+            force_x = 0.0
+            force_y = float(lateral_force)
+        height_offset = float(pert.get("impulse_height") or 0.0)
+        policy = (
+            controller
+            if controller is not None
+            else make_controller(controller_name or ACTIVE_CONTROLLER, kp, kd)
+        )
+        if hasattr(policy, "reset"):
+            policy.reset()
 
         for step in range(1, MAX_STEPS + 1):
             if last_desired is None or (step - 1) % hold == 0:
-                apply_pd(
+                last_desired = command_from_controller(
                     model,
                     data,
+                    policy,
                     q_target,
-                    kp=kp,
-                    kd=kd,
-                    rng=obs_rng,
-                    obs_noise_q=noise_q,
-                    obs_noise_v=noise_v,
-                    obs_bias_q=bias_q + drift_q * (step - 1),
+                    step,
+                    dt,
+                    obs_rng,
+                    noise_q,
+                    noise_v,
+                    bias_q + drift_q * (step - 1),
                     gravity_ff=gravity_ff,
                     ff_ctrl=applied_ff,
                 )
-                last_desired = np.array(data.ctrl, copy=True)
             ctrl_buf.append(np.array(last_desired, copy=True))
             raw = np.array(ctrl_buf[0], copy=True)
             data.ctrl[:] = raw
             max_abs_ctrl_raw = max(max_abs_ctrl_raw, float(np.max(np.abs(raw))))
             util = float(np.max(np.abs(raw) / np.maximum(limit_abs, 1e-9)))
             max_util_raw = max(max_util_raw, util)
-            exceeded = np.any(raw < limits[:, 0] - 1e-12) | np.any(
-                raw > limits[:, 1] + 1e-12
+            exceeded = np.any(raw < limits[:, 0] - 1e-9) | np.any(
+                raw > limits[:, 1] + 1e-9
             )
-            if clip_ctrl:
-                if bool(exceeded):
-                    hit_limit = True
-                np.clip(data.ctrl, limits[:, 0], limits[:, 1], out=data.ctrl)
+            np.clip(data.ctrl, limits[:, 0], limits[:, 1], out=data.ctrl)
+            applied_util = np.abs(data.ctrl) / np.maximum(limit_abs, 1e-9)
+            if bool(exceeded) or float(np.max(applied_util)) >= 1.0 - 1e-6:
+                sat_steps += 1
+                hit_limit = True
             max_abs_ctrl = max(max_abs_ctrl, float(np.max(np.abs(data.ctrl))))
             apply_torso_impulse(
                 data,
                 torso_body_id,
                 step,
-                lateral_force,
+                force_y,
                 impulse_start=impulse_start,
                 impulse_end=impulse_end,
+                force_x=force_x,
+                height_offset=height_offset,
             )
             mujoco.mj_step(model, data)
+            tau = np.abs(np.asarray(data.qfrc_actuator[act_dofs], dtype=float))
+            tau_lim = np.maximum(np.abs(act_gears) * limit_abs, 1e-9)
+            max_tau_over_limit = max(max_tau_over_limit, float(np.max(tau / tau_lim)))
             z = float(data.qpos[2])
             roll, pitch = freejoint_roll_pitch(data.qpos)
             tilt = tilt_from_vertical(data.qpos)
@@ -1235,17 +1570,30 @@ def simulate_episode(
             max_abs_pitch = max(max_abs_pitch, abs(pitch))
             max_tilt = max(max_tilt, tilt)
             max_body_speed = max(max_body_speed, speed)
+            body_xy = np.array(data.qpos[:2], dtype=float)
+            slip_now = 0.0
+            rels = []
             for gid in feet:
-                xy = data.geom_xpos[gid][:2]
-                foot_slip_max = max(
-                    foot_slip_max,
-                    float(np.linalg.norm(xy - foot_xy0[gid])),
+                xy = np.array(data.geom_xpos[gid][:2], dtype=float)
+                rel = xy - body_xy
+                slip_now = max(slip_now, float(np.linalg.norm(rel - foot_rel0[gid])))
+                foot_slip_world_max = max(
+                    foot_slip_world_max, float(np.linalg.norm(xy - (foot_rel0[gid] + body_xy0)))
                 )
+                rels.append(rel.tolist())
+            foot_slip_max = max(foot_slip_max, slip_now)
             zs.append(z)
             ys.append(float(data.qpos[1]))
             if record_trace:
                 rolls.append(roll)
                 pitches.append(pitch)
+                speed_trace.append(speed)
+                foot_rel_trace.append([c for rel in rels for c in rel])
+            if step == measure_step:
+                z_settle = z
+                foot_slip_at_measure = slip_now
+                body_speed_at_measure = speed
+                roll_at_measure = abs(roll)
             if window is not None:
                 window.append(snapshot(step, data, z, roll, pitch, tilt, speed))
             if step == impulse_start - 1 or (impulse_start <= 1 and step == 1):
@@ -1279,7 +1627,7 @@ def simulate_episode(
                 reason = "upright_hold"
             if reason is not None:
                 fail_step = step
-                fail_reason = "tilt"
+                fail_reason = reason
                 break
     finally:
         model.body_mass[torso_body_id] = orig_mass
@@ -1289,22 +1637,38 @@ def simulate_episode(
         geom_id: float(model.geom_friction[geom_id, 0]) for geom_id in friction_geoms
     }
     n_tail = min(len(zs), settle_window) if zs else 0
-    z_after_settle = float(np.mean(zs[-n_tail:])) if n_tail else float(z_start)
+    z_tail = float(np.mean(zs[-n_tail:])) if n_tail else float(z_start)
     min_z_after_settle = float(np.min(zs[-n_tail:])) if n_tail else float(z_start)
-    tilt_fail = fail_reason == "tilt"
+    if z_settle is None:
+        z_settle = z_tail
+    if foot_slip_at_measure is None:
+        foot_slip_at_measure = float(foot_slip_max)
+    z_after_settle = float(z_settle)
+    fall_kind = fail_reason if fail_reason in ("tilt", "contact_z", "upright_hold") else None
+    fall = fall_kind is not None
+    if fall:
+        fail_reason = "fall"
+    tilt_fail = fall
     stance_loss = False
-    stance_loss_step = None
-    if z_ref is not None and z_ref > 1e-9:
-        z_lim = float(loss_frac) * float(z_ref)
-        if z_after_settle < z_lim:
+    degradation = False
+    z_thr = STANCE_THRESH.get("z_threshold")
+    slip_thr = STANCE_THRESH.get("slip_threshold")
+    z_ref_use = z_ref if z_ref is not None else STANCE_THRESH.get("z_ref")
+    if not fall:
+        z_bad = z_thr is not None and z_after_settle < float(z_thr)
+        slip_bad = slip_thr is not None and foot_slip_at_measure > float(slip_thr)
+        if z_bad or slip_bad:
             stance_loss = True
-            stance_loss_step = len(zs)
-            if fail_reason is None:
-                fail_reason = "stance_loss"
-                fail_step = stance_loss_step
-            elif fail_reason == "tilt":
-                fail_reason = "tilt+stance_loss"
-    failed = tilt_fail or stance_loss
+            fail_reason = "stance_loss"
+            fail_step = int(measure_step)
+        elif (
+            z_ref_use is not None
+            and float(z_ref_use) > 1e-9
+            and z_after_settle < (1.0 - DEGRADATION_FRAC) * float(z_ref_use)
+        ):
+            degradation = True
+            fail_reason = None
+    failed = fall or stance_loss
     metrics = {
         "episode": int(episode),
         "seed": int(pert["seed"]),
@@ -1316,8 +1680,11 @@ def simulate_episode(
         "joint_jitter_rms": float(np.sqrt(np.mean(np.square(pert["joint_jitter"])))),
         "failed": failed,
         "fail_reason": fail_reason,
+        "fail_fall": fall,
         "fail_tilt": tilt_fail,
         "fail_stance_loss": stance_loss,
+        "fall_kind": fall_kind,
+        "degradation": degradation,
         "fail_step": fail_step,
         "fail_time": None if fail_step is None else float(fail_step) * dt,
         "impact_phase": None
@@ -1327,12 +1694,18 @@ def simulate_episode(
         "sag_step": sag_step,
         "min_z": float(min_z),
         "z_after_settle": z_after_settle,
+        "z_settle": float(z_after_settle),
         "min_z_after_settle": min_z_after_settle,
+        "measure_step": int(measure_step),
         "max_abs_roll": float(max_abs_roll),
         "max_abs_pitch": float(max_abs_pitch),
         "max_tilt": float(max_tilt),
         "max_body_speed": float(max_body_speed),
-        "foot_slip_max": float(foot_slip_max),
+        "foot_slip_max": float(foot_slip_at_measure),
+        "foot_slip_rel": float(foot_slip_at_measure),
+        "foot_slip_world_max": float(foot_slip_world_max),
+        "body_speed_at_measure": body_speed_at_measure,
+        "roll_at_measure": roll_at_measure,
         "settle_time_s": settle_time_s,
         "stance_ref_z": None if z_ref is None else float(z_ref),
         "stance_loss_frac": float(loss_frac),
@@ -1349,6 +1722,8 @@ def simulate_episode(
         "max_abs_ctrl": max_abs_ctrl,
         "max_abs_ctrl_raw": max_abs_ctrl_raw,
         "max_util_raw": max_util_raw,
+        "max_tau_over_limit": float(max_tau_over_limit),
+        "saturation_frac": (sat_steps / len(zs)) if zs else 0.0,
         "hit_limit": hit_limit,
         "y_end": ys[-1] if ys else 0.0,
         "max_abs_y": max((abs(y) for y in ys), default=0.0),
@@ -1356,6 +1731,8 @@ def simulate_episode(
         "y": ys if record_trace else [],
         "roll": rolls,
         "pitch": pitches,
+        "speed": speed_trace,
+        "foot_rel": foot_rel_trace,
         "final_z": float(zs[-1]) if zs else float(z_start),
     }
     if window is not None:
@@ -1550,17 +1927,18 @@ def probe_torque_limit(
     kp: float,
     kd: float,
     lateral_force: float = COM_PROBE_FORCE,
-) -> None:
-    origin = read_ctrlrange(model)
+) -> list[dict]:
+    origin = stock_ctrlrange(model)
     print(
         f"\nпроверка ограничения момента: μ={COM_PROBE_FRICTION:g} "
         f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}  "
-        f"ctrlrange0 hip=[{origin[0, 0]:.2f}, {origin[0, 1]:.2f}]"
+        f"ctrlrange0 hip=[{origin[0, 0]:.2f}, {origin[0, 1]:.2f}]  "
+        f"ctrllimited={bool(model.actuator_ctrllimited[0])}"
     )
     results: list[dict] = []
     try:
         for scale in TORQUE_PROBE_SCALES:
-            written = write_ctrlrange(model, origin * scale)
+            written = apply_torque_limit(model, scale)
             result = run_controlled_episode(
                 model,
                 data,
@@ -1580,17 +1958,19 @@ def probe_torque_limit(
             hip_limit = float(np.min(np.abs(written[0])))
             calf_limit = float(np.min(np.abs(written[2])))
             hit = "да" if result["hit_limit"] else "нет"
+            sat = float(result["saturation_frac"])
             print(
                 f"  {label} ctrlrange: hip=[{written[0, 0]:.2f}, {written[0, 1]:.2f}] "
                 f"calf=[{written[2, 0]:.2f}, {written[2, 1]:.2f}]  "
                 f"{episode_status(result)}, z_end={result['z_end']:.4f}, "
-                f"z_min={result['z_min']:.4f}  "
+                f"z_min={result['min_z']:.4f}  "
                 f"max|ctrl|_raw={result['max_abs_ctrl_raw']:.3f}  "
-                f"max|ctrl|={result['max_abs_ctrl']:.3f}  "
+                f"max|tau|/limit={result['max_tau_over_limit']:.3f}  "
+                f"sat={format_sat_pct(sat)} ({saturation_note(sat)})  "
                 f"потолок hip={hip_limit:.2f} calf={calf_limit:.2f}  упёрся={hit}"
             )
     finally:
-        restored = write_ctrlrange(model, origin)
+        restored = apply_torque_limit(model, 1.0)
         if float(np.max(np.abs(restored - origin))) > 1e-12:
             raise RuntimeError("не удалось восстановить actuator_ctrlrange")
         print(
@@ -1609,6 +1989,15 @@ def probe_torque_limit(
             print("  траектории различаются, потолок момента влияет на устойчивость")
         elif reduced_hit and any(r["hit_limit"] for r in reduced_hit):
             print("  потолок сработал (ctrl упёрся в лимит)")
+    return [
+        {
+            "scale": r["scale"],
+            "label": r["label"],
+            **torque_episode(r),
+            "status": episode_status(r),
+        }
+        for r in results
+    ]
 
 
 def probe_action_delay(
@@ -1952,6 +2341,7 @@ def run_stress_batch(
     kd: float,
     keep_windows: bool,
     factor: dict | None = None,
+    controller_name: str | None = None,
 ) -> dict:
     episodes: list[dict] = []
     failed_episodes: list[dict] = []
@@ -1962,6 +2352,9 @@ def run_stress_batch(
     extra_ctrl = factor.get("ctrl") if isinstance(factor, dict) else None
     gravity_ff = bool(extra_ctrl.get("gravity_ff")) if extra_ctrl else False
     keyframe_ff = bool(extra_ctrl.get("keyframe_ff")) if extra_ctrl else False
+    ff_ctrl = extra_ctrl.get("ff_ctrl") if extra_ctrl else None
+    if ff_ctrl is not None:
+        ff_ctrl = np.asarray(ff_ctrl, dtype=float)
     target_override = extra_ctrl.get("target_qpos") if extra_ctrl else None
     if target_override is not None:
         target_override = np.asarray(target_override, dtype=float)
@@ -1987,13 +2380,19 @@ def run_stress_batch(
             factor=factor,
             gravity_ff=gravity_ff,
             keyframe_ff=keyframe_ff,
+            ff_ctrl=ff_ctrl,
             target_override=target_override,
             stance_ref_z=stance_ref_z,
             stance_loss_frac=stance_loss_frac,
             foot_ids=foot_ids,
+            controller_name=controller_name or ACTIVE_CONTROLLER,
         )
         record = {
-            **{k: v for k, v in result.items() if k not in ("z", "y", "roll", "pitch")},
+            **{
+                k: v
+                for k, v in result.items()
+                if k not in ("z", "y", "roll", "pitch", "speed", "foot_rel")
+            },
             "torso_body_id": int(torso_body_id),
             "floor_geom_id": int(floor_id),
             "kp": kp,
@@ -2037,8 +2436,9 @@ def summarize_episode_lists(
     n_episodes = len(episodes)
     n_failures = len(failed_episodes)
     n_sag = sum(1 for ep in episodes if ep.get("sag_below_0_20"))
-    n_tilt = sum(1 for ep in episodes if ep.get("fail_tilt"))
+    n_tilt = sum(1 for ep in episodes if ep.get("fail_fall") or ep.get("fail_tilt"))
     n_stance_loss = sum(1 for ep in episodes if ep.get("fail_stance_loss"))
+    n_degradation = sum(1 for ep in episodes if ep.get("degradation"))
     n_before = sum(
         1
         for ep in failed_episodes
@@ -2072,9 +2472,15 @@ def summarize_episode_lists(
         "n_tilt": n_tilt,
         "tilt_rate": n_tilt / n_episodes if n_episodes else 0.0,
         "tilt_rate_ci95": list(wilson_ci(n_tilt, n_episodes)),
+        "n_fall": n_tilt,
+        "fall_rate": n_tilt / n_episodes if n_episodes else 0.0,
+        "fall_rate_ci95": list(wilson_ci(n_tilt, n_episodes)),
         "n_stance_loss": n_stance_loss,
         "stance_loss_rate": n_stance_loss / n_episodes if n_episodes else 0.0,
         "stance_loss_rate_ci95": list(wilson_ci(n_stance_loss, n_episodes)),
+        "n_degradation": n_degradation,
+        "degradation_rate": n_degradation / n_episodes if n_episodes else 0.0,
+        "degradation_rate_ci95": list(wilson_ci(n_degradation, n_episodes)),
         "stance_ref_z": STANCE_REF.get("z"),
         "stance_loss_frac": STANCE_REF.get("frac"),
         "n_before_impact": n_before,
@@ -2088,6 +2494,12 @@ def summarize_episode_lists(
         "episodes": episodes,
         "min_z_mean": float(np.mean(min_zs)) if min_zs else None,
         "max_abs_roll_mean": float(np.mean(max_rolls)) if max_rolls else None,
+        "max_tau_over_limit_mean": float(
+            np.mean([float(ep["max_tau_over_limit"]) for ep in episodes if ep.get("max_tau_over_limit") is not None])
+        ) if any(ep.get("max_tau_over_limit") is not None for ep in episodes) else None,
+        "saturation_frac_mean": float(
+            np.mean([float(ep["saturation_frac"]) for ep in episodes if ep.get("saturation_frac") is not None])
+        ) if any(ep.get("saturation_frac") is not None for ep in episodes) else None,
     }
 
 
@@ -2125,6 +2537,7 @@ def split_chunks(
 
 
 def _run_chunk(payload: dict) -> dict:
+    controllers.apply_import_root(payload.get("controller_import_root"))
     model = mujoco.MjModel.from_xml_path(MODEL_PATH)
     data = mujoco.MjData(model)
     floor_id = find_floor_geom_id(model)
@@ -2138,6 +2551,10 @@ def _run_chunk(payload: dict) -> dict:
         STANCE_REF["z"] = float(payload["stance_ref_z"])
     if payload.get("stance_loss_frac") is not None:
         STANCE_REF["frac"] = float(payload["stance_loss_frac"])
+    if payload.get("stance_thresh"):
+        STANCE_THRESH.update(payload["stance_thresh"])
+    if payload.get("impulse_cfg"):
+        IMPULSE_CFG.update(payload["impulse_cfg"])
     return run_stress_batch(
         model,
         data,
@@ -2150,6 +2567,7 @@ def _run_chunk(payload: dict) -> dict:
         float(payload["kd"]),
         bool(payload["keep_windows"]),
         factor=factor,
+        controller_name=payload.get("controller") or ACTIVE_CONTROLLER,
     )
 
 
@@ -2191,6 +2609,8 @@ def run_stress_batch_parallel(
 ) -> dict:
     chunks = split_chunks(specs, CHUNK_SIZE)
     n_workers = min(len(chunks), os.cpu_count() or 1)
+    controller_spec = controllers.canonical_controller_spec(ACTIVE_CONTROLLER)
+    import_root = controllers.CONTROLLER_IMPORT_ROOT
     payloads = [
         {
             "specs": chunk,
@@ -2201,20 +2621,26 @@ def run_stress_batch_parallel(
             "factor": factor,
             "stance_ref_z": STANCE_REF.get("z"),
             "stance_loss_frac": STANCE_REF.get("frac"),
+            "stance_thresh": dict(STANCE_THRESH),
+            "impulse_cfg": dict(IMPULSE_CFG),
+            "controller": controller_spec,
+            "controller_import_root": import_root,
         }
         for chunk in chunks
     ]
     started = time.perf_counter()
-    if n_workers <= 1:
+    use_pool = len(chunks) > 1
+    if not use_pool:
         parts = [_run_chunk(payload) for payload in payloads]
     else:
-        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+        with ProcessPoolExecutor(max_workers=max(1, n_workers)) as pool:
             parts = list(pool.map(_run_chunk, payloads))
     elapsed = time.perf_counter() - started
     batch = merge_batch_parts(parts, kp, kd)
     batch["elapsed_s"] = float(elapsed)
-    batch["n_workers"] = int(n_workers)
+    batch["n_workers"] = int(max(1, n_workers) if use_pool else 1)
     batch["n_chunks"] = len(chunks)
+    batch["used_process_pool"] = bool(use_pool)
     return batch
 
 
@@ -2250,6 +2676,7 @@ def batch_rate_summary(batch: dict) -> dict:
         "elapsed_s": batch.get("elapsed_s"),
         "n_workers": batch.get("n_workers"),
         "n_chunks": batch.get("n_chunks"),
+        "outcomes": [outcome_record(ep) for ep in batch.get("episodes") or []],
     }
 
 
@@ -2258,16 +2685,22 @@ def run_parameter_sweeps(
     kp: float,
     kd: float,
     scenario: dict,
+    n_episodes: int | None = None,
 ) -> dict:
+    n_ep = int(N_SWEEP_EPISODES if n_episodes is None else n_episodes)
     specs = generate_episode_specs(
-        N_SWEEP_EPISODES,
+        n_ep,
         SEED,
         scenario["friction_range"],
         scenario["lateral_force_range"],
     )
     print(
-        f"\nOFAT-проверка параметров: {N_SWEEP_EPISODES} эпизодов на уровень, "
+        f"\nOFAT-проверка параметров: {n_ep} эпизодов на уровень, "
         f"seed={SEED}, сценарий={scenario['id']}, параллельные воркеры"
+    )
+    print(
+        "  парный точный Макнемар vs baseline на общих seed; "
+        f"{HOLM_FAMILY_NOTE}"
     )
     parameters: list[dict] = []
     for spec in PARAMETER_SWEEPS:
@@ -2294,42 +2727,94 @@ def run_parameter_sweeps(
             levels_out[0],
         )
         base_rate = float(baseline["failure_rate"])
-        worst = max(levels_out, key=lambda row: float(row["failure_rate"]))
         for row in levels_out:
-            delta = float(row["failure_rate"]) - base_rate
-            row["delta_vs_baseline"] = delta
-            mark = "  (норма)" if row["id"] == baseline["id"] else ""
-            lo, hi = row.get("failure_rate_ci95") or (0.0, 0.0)
-            print(
-                f"    {row['label']}: сбои={row['failure_rate'] * 100:.1f}% "
-                f"({row['n_failures']}/{row['n_episodes']}, "
-                f"CI95[{lo * 100:.1f},{hi * 100:.1f}])  "
-                f"просадка={float(row.get('sag_rate') or 0.0) * 100:.1f}%  "
-                f"Δ vs норма={delta * 100:+.1f} п.п.  "
-                f"до удара: {row['n_before_impact']}  "
-                f"при/после: {row['n_at_or_after_impact']}  "
-                f"время={row['elapsed_s']:.2f}с{mark}"
-            )
-        print(
-            f"    больше всего сбоев: {worst['label']} "
-            f"({worst['failure_rate'] * 100:.1f}%, "
-            f"{(float(worst['failure_rate']) - base_rate) * 100:+.1f} п.п. к норме)"
-        )
+            row["delta_vs_baseline"] = float(row["failure_rate"]) - base_rate
+            if row["id"] == baseline["id"]:
+                row["mcnemar"] = None
+                row["p_mcnemar"] = None
+                row["p_holm"] = None
+                row["significant"] = False
+                row["effect_label"] = "норма"
+            else:
+                mc = mcnemar_exact_paired(baseline["outcomes"], row["outcomes"])
+                row["mcnemar"] = mc
+                row["p_mcnemar"] = mc["pvalue"]
+                row["p_holm"] = None
+                row["significant"] = False
+                row["effect_label"] = "в пределах шума"
         parameters.append(
             {
                 "id": spec["id"],
                 "name": spec["name"],
                 "baseline": spec["baseline"],
                 "levels": levels_out,
-                "worst_level": worst["id"],
-                "worst_label": worst["label"],
                 "baseline_failure_rate": base_rate,
-                "worst_failure_rate": float(worst["failure_rate"]),
-                "worst_delta_vs_baseline": float(worst["failure_rate"]) - base_rate,
             }
         )
+    family: list[tuple[int, int, float]] = []
+    for pi, param in enumerate(parameters):
+        for li, row in enumerate(param["levels"]):
+            if row.get("p_mcnemar") is not None:
+                family.append((pi, li, float(row["p_mcnemar"])))
+    p_adj, sigs = holm_adjust([p for _, _, p in family])
+    for (pi, li, _), padj, sig in zip(family, p_adj, sigs):
+        row = parameters[pi]["levels"][li]
+        row["p_holm"] = padj
+        row["significant"] = bool(sig)
+        row["effect_label"] = "значимо" if sig else "в пределах шума"
+    print(
+        f"  Холм: {len(family)} p-значений Макнемара "
+        f"(ненулевые уровни всех факторов vs свой baseline, сценарий {scenario['id']})"
+    )
+    for param in parameters:
+        print(f"  {param['name']} ({param['id']}):")
+        levels_out = param["levels"]
+        baseline = next(row for row in levels_out if row["id"] == param["baseline"])
+        worst = max(levels_out, key=lambda row: float(row["failure_rate"]))
+        sig_rows = [row for row in levels_out if row.get("significant")]
+        for row in levels_out:
+            lo, hi = row.get("failure_rate_ci95") or (0.0, 0.0)
+            if row["id"] == baseline["id"]:
+                extra = "норма"
+            else:
+                p_raw = row.get("p_mcnemar")
+                p_h = row.get("p_holm")
+                extra = (
+                    f"p_mcnemar={p_raw:.4g}  p_holm={p_h:.4g}  {row['effect_label']}"
+                    if p_raw is not None and p_h is not None
+                    else row["effect_label"]
+                )
+            print(
+                f"    {row['label']}: сбои={row['failure_rate'] * 100:.1f}% "
+                f"({row['n_failures']}/{row['n_episodes']}, "
+                f"Уилсон 95% CI[{lo * 100:.1f},{hi * 100:.1f}])  "
+                f"Δ vs норма={row['delta_vs_baseline'] * 100:+.1f} п.п.  "
+                f"{extra}  t={row['elapsed_s']:.2f}с"
+            )
+        param["worst_level"] = worst["id"]
+        param["worst_label"] = worst["label"]
+        param["worst_failure_rate"] = float(worst["failure_rate"])
+        param["worst_delta_vs_baseline"] = float(worst["failure_rate"]) - float(
+            param["baseline_failure_rate"]
+        )
+        param["n_significant_levels"] = len(sig_rows)
+        if sig_rows:
+            leader = max(sig_rows, key=lambda row: float(row["failure_rate"]))
+            param["significant_leader_id"] = leader["id"]
+            param["significant_leader_label"] = leader["label"]
+            print(
+                f"    значимо vs baseline (Холм): "
+                + ", ".join(
+                    f"{row['label']} (Δ{row['delta_vs_baseline'] * 100:+.1f} п.п.)"
+                    for row in sig_rows
+                )
+            )
+        else:
+            param["significant_leader_id"] = None
+            param["significant_leader_label"] = None
+            print("    значимых отличий от базы нет (Холм) — сдвиги в пределах шума")
     return {
-        "n_episodes": N_SWEEP_EPISODES,
+        "n_episodes": n_ep,
         "seed": SEED,
         "kp": kp,
         "kd": kd,
@@ -2337,6 +2822,14 @@ def run_parameter_sweeps(
         "scenario_label": scenario["label"],
         "friction_range": list(scenario["friction_range"]),
         "lateral_force_range": list(scenario["lateral_force_range"]),
+        "failure_criterion": "fall OR stance_loss",
+        "multiple_testing": {
+            "method": "holm",
+            "alpha": 0.05,
+            "family": HOLM_FAMILY_NOTE,
+            "n_tests": len(family),
+            "scenario": scenario["id"],
+        },
         "parameters": parameters,
     }
 
@@ -2405,8 +2898,10 @@ def print_batch_rates(prefix: str, batch: dict) -> None:
     print(
         f"{prefix}сбои={k}/{n}={batch['failure_rate'] * 100:.1f}% "
         f"CI95[{lo * 100:.1f},{hi * 100:.1f}]  "
-        f"tilt={nt}/{n}={float(batch.get('tilt_rate') or 0.0) * 100:.1f}%  "
+        f"fall={nt}/{n}={float(batch.get('fall_rate') or batch.get('tilt_rate') or 0.0) * 100:.1f}%  "
         f"stance_loss={ns}/{n}={float(batch.get('stance_loss_rate') or 0.0) * 100:.1f}%  "
+        f"degradation={int(batch.get('n_degradation') or 0)}/{n}="
+        f"{float(batch.get('degradation_rate') or 0.0) * 100:.1f}%  "
         f"просадка z<0.20={ks}/{n}={float(batch.get('sag_rate') or 0.0) * 100:.1f}% "
         f"CI95[{slo * 100:.1f},{shi * 100:.1f}]  "
         f"причины: {reason_txt}"
@@ -2528,6 +3023,7 @@ def measure_stance_reference(
     kp: float,
     kd: float,
     frac: float,
+    announce_frac_rule: bool = True,
 ) -> float:
     result = simulate_episode(
         model,
@@ -2553,11 +3049,15 @@ def measure_stance_reference(
     STANCE_REF["kd"] = float(kd)
     z_lim = float(frac) * z_ref
     print(
-        f"\nэталон стойки: опорный PD kp={kp:g} kd={kd:g}, μ=1 Fy=0, без джиттера\n"
+        f"\nэталон стойки: контроллер {ACTIVE_CONTROLLER}, "
+        f"PD kp={kp:g} kd={kd:g}, μ=1 Fy=0, без джиттера\n"
         f"  z_start={result['z_start']:.4f} z_end={result['z_end']:.4f} "
-        f"z_after_settle={z_ref:.4f} м\n"
-        f"  stance_loss если z_after_settle < {frac:.2f}×{z_ref:.4f} = {z_lim:.4f} м"
+        f"z_ref={z_ref:.4f} м"
     )
+    if announce_frac_rule:
+        print(
+            f"  stance_loss если z_after_settle < {frac:.2f}×{z_ref:.4f} = {z_lim:.4f} м"
+        )
     return z_ref
 
 
@@ -3003,13 +3503,17 @@ def compare_ofat_sweeps(sweeps: list[dict]) -> None:
         left = nom_params.get(param["id"])
         if left is None:
             continue
+        nom_sig = left.get("significant_leader_label") or "нет значимых"
+        mod_sig = param.get("significant_leader_label") or "нет значимых"
         print(
             f"  {param['name']}: nominal худший {left['worst_label']} "
             f"{left['worst_failure_rate'] * 100:.1f}% "
-            f"(Δ{left['worst_delta_vs_baseline'] * 100:+.1f}); "
+            f"(Δ{left['worst_delta_vs_baseline'] * 100:+.1f}, "
+            f"Холм: {nom_sig}); "
             f"moderate худший {param['worst_label']} "
             f"{param['worst_failure_rate'] * 100:.1f}% "
-            f"(Δ{param['worst_delta_vs_baseline'] * 100:+.1f})"
+            f"(Δ{param['worst_delta_vs_baseline'] * 100:+.1f}, "
+            f"Холм: {mod_sig})"
         )
 
 
@@ -3119,12 +3623,57 @@ def run_pd_comparison(
     return main_batch
 
 
-def print_main_batch_summary(pd_name: str, batch: dict) -> None:
+def main_batch_heading(controller: str, pd_name: str, kp: float, kd: float) -> str:
+    return (
+        f"основной прогон (контроллер {controller}, "
+        f"PD {pd_name}, kp={kp:g}, kd={kd:g}):"
+    )
+
+
+def stance_reference_record(
+    controller: str,
+    pd_name: str,
+    kp: float,
+    kd: float,
+    z_ref,
+    frac,
+) -> dict:
+    z_lim = None
+    if z_ref is not None and frac is not None:
+        z_lim = float(frac) * float(z_ref)
+    return {
+        "controller": controller,
+        "pd": pd_name,
+        "kp": float(kp),
+        "kd": float(kd),
+        "z_ref": None if z_ref is None else float(z_ref),
+        "stance_loss_frac": None if frac is None else float(frac),
+        "stance_loss_z_limit": z_lim,
+        "z_threshold": STANCE_THRESH.get("z_threshold"),
+        "slip_threshold": STANCE_THRESH.get("slip_threshold"),
+    }
+
+
+def print_main_batch_summary(
+    pd_name: str,
+    batch: dict,
+    controller: str | None = None,
+    stance: dict | None = None,
+) -> None:
     failed_friction_stats = value_stats(batch["failed_friction"])
     failed_force_stats = value_stats(batch["failed_force"])
     survived_friction_stats = value_stats(batch["survived_friction"])
     survived_force_stats = value_stats(batch["survived_force"])
-    print(f"\nосновной прогон ({pd_name}, kp={batch['kp']:g}, kd={batch['kd']:g}):")
+    ctrl = controller or ACTIVE_CONTROLLER
+    print(f"\n{main_batch_heading(ctrl, pd_name, batch['kp'], batch['kd'])}")
+    if stance:
+        z_ref = stance.get("z_ref")
+        z_thr = stance.get("z_threshold")
+        slip = stance.get("slip_threshold")
+        z_txt = f"{float(z_ref):.4f} м" if z_ref is not None else "нет"
+        thr_txt = f"z<{float(z_thr):.4f} м" if z_thr is not None else "z нет"
+        slip_txt = f"slip>{float(slip):.4f} м" if slip is not None else "slip нет"
+        print(f"эталон z_ref={z_txt}  порог stance_loss: {thr_txt}  {slip_txt}")
     print(f"всего прогонов: {batch['n_episodes']}  seed={SEED}")
     print(
         f"параллельно: {batch['n_workers']} workers, "
@@ -3346,14 +3895,962 @@ def run_gravity_ff_diagnosis(
     return payload
 
 
+def compact_episode(ep: dict) -> dict:
+    keep = (
+        "episode",
+        "seed",
+        "friction",
+        "lateral_force",
+        "failed",
+        "fail_reason",
+        "fail_fall",
+        "fail_tilt",
+        "fail_stance_loss",
+        "z_settle",
+        "z_after_settle",
+        "min_z",
+        "foot_slip_rel",
+        "foot_slip_max",
+        "max_abs_roll",
+        "max_abs_pitch",
+        "max_body_speed",
+        "max_tau_over_limit",
+        "saturation_frac",
+        "hit_limit",
+        "fall_kind",
+        "impulse_start",
+        "impulse_end",
+    )
+    return {k: ep.get(k) for k in keep}
+
+
+def torque_episode(ep: dict) -> dict:
+    sat = ep.get("saturation_frac")
+    tau = ep.get("max_tau_over_limit")
+    return {
+        "episode": ep.get("episode"),
+        "seed": ep.get("seed"),
+        "friction": ep.get("friction"),
+        "lateral_force": ep.get("lateral_force"),
+        "fail": bool(ep.get("failed")),
+        "fall": bool(ep.get("fail_fall") or ep.get("fail_tilt")),
+        "stance_loss": bool(ep.get("fail_stance_loss")),
+        "fail_reason": ep.get("fail_reason"),
+        "fall_kind": ep.get("fall_kind"),
+        "z_settle": ep.get("z_settle", ep.get("z_after_settle")),
+        "min_z": ep.get("min_z"),
+        "z_end": ep.get("z_end"),
+        "max_tau_over_limit": None if tau is None else float(tau),
+        "saturation_frac": None if sat is None else float(sat),
+        "limit_reached": bool(sat is not None and float(sat) > 1e-12),
+        "limit_note": saturation_note(None if sat is None else float(sat)),
+        "hit_limit": bool(ep.get("hit_limit")),
+    }
+
+
+def criteria_episode(ep: dict) -> dict:
+    slip = ep.get("foot_slip_rel", ep.get("foot_slip_max"))
+    return {
+        "episode": ep.get("episode"),
+        "seed": ep.get("seed"),
+        "friction": ep.get("friction"),
+        "lateral_force": ep.get("lateral_force"),
+        "fail": bool(ep.get("failed")),
+        "fall": bool(ep.get("fail_fall") or ep.get("fail_tilt")),
+        "stance_loss": bool(ep.get("fail_stance_loss")),
+        "z_settle": ep.get("z_settle", ep.get("z_after_settle")),
+        "slip": None if slip is None else float(slip),
+        "min_z": ep.get("min_z"),
+        "max_abs_roll": ep.get("max_abs_roll"),
+        "max_abs_pitch": ep.get("max_abs_pitch"),
+        "max_body_speed": ep.get("max_body_speed"),
+    }
+
+
+def fit_outcome_thresholds(episodes: list[dict], z_ref: float) -> dict:
+    standing = [
+        ep
+        for ep in episodes
+        if not ep.get("fail_fall") and not ep.get("fail_tilt")
+    ]
+    zs = np.array(
+        [
+            float(ep.get("z_settle", ep.get("z_after_settle")))
+            for ep in standing
+            if ep.get("z_settle", ep.get("z_after_settle")) is not None
+        ],
+        dtype=float,
+    )
+    slips = np.array(
+        [
+            float(ep.get("foot_slip_rel", ep.get("foot_slip_max") or 0.0))
+            for ep in standing
+        ],
+        dtype=float,
+    )
+    if zs.size == 0:
+        raise RuntimeError("нет стоячих эпизодов nominal для порога stance_loss")
+    z_std = float(zs.std(ddof=1)) if zs.size > 1 else 0.0
+    slip_std = float(slips.std(ddof=1)) if slips.size > 1 else 0.0
+    z_min = float(zs.min())
+    slip_max = float(slips.max())
+    derivation = {
+        "n_nominal": int(len(episodes)),
+        "n_standing": int(zs.size),
+        "z_ref": float(z_ref),
+        "z_settle_mean": float(zs.mean()),
+        "z_settle_min": z_min,
+        "z_settle_max": float(zs.max()),
+        "z_settle_std": z_std,
+        "z_threshold_rule": "min(nominal) - 3σ",
+        "z_threshold": z_min - 3.0 * z_std,
+        "slip_mean": float(slips.mean()),
+        "slip_min": float(slips.min()),
+        "slip_max": slip_max,
+        "slip_std": slip_std,
+        "slip_threshold_rule": "max(nominal) + 3σ",
+        "slip_threshold": slip_max + 3.0 * slip_std,
+        "failure_criterion": {
+            "fail": "fall OR stance_loss",
+            "fall": "abs(roll)>45° or abs(pitch)>45° or body z<0.12 m",
+            "stance_loss": "z_settle < z_threshold OR slip > slip_threshold",
+            "slip": "max foot xy displacement relative to body",
+            "measure": f"{POST_IMPACT_MEASURE_S:.2f}s after impulse_end",
+        },
+        "post_impact_measure_s": POST_IMPACT_MEASURE_S,
+        "seed": SEED,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    STANCE_THRESH.update(
+        {
+            "z_threshold": derivation["z_threshold"],
+            "slip_threshold": derivation["slip_threshold"],
+            "z_ref": float(z_ref),
+            "n": int(zs.size),
+            "derivation": derivation,
+        }
+    )
+    STANCE_REF["z"] = float(z_ref)
+    return derivation
+
+
+def relabel_outcomes(episodes: list[dict]) -> None:
+    z_thr = STANCE_THRESH.get("z_threshold")
+    slip_thr = STANCE_THRESH.get("slip_threshold")
+    for ep in episodes:
+        fall = bool(ep.get("fail_fall") or ep.get("fail_reason") in ("fall", "tilt"))
+        z_s = ep.get("z_settle", ep.get("z_after_settle"))
+        slip = ep.get("foot_slip_rel", ep.get("foot_slip_max"))
+        stance_loss = False
+        if not fall:
+            z_bad = (
+                z_thr is not None
+                and z_s is not None
+                and float(z_s) < float(z_thr)
+            )
+            slip_bad = (
+                slip_thr is not None
+                and slip is not None
+                and float(slip) > float(slip_thr)
+            )
+            if z_bad or slip_bad:
+                stance_loss = True
+        ep["fail_fall"] = fall
+        ep["fail_tilt"] = fall
+        ep["fail_stance_loss"] = stance_loss
+        ep["failed"] = fall or stance_loss
+        if fall:
+            ep["fail_reason"] = "fall"
+        elif stance_loss:
+            ep["fail_reason"] = "stance_loss"
+        else:
+            ep["fail_reason"] = None
+
+
+def outcome_counts(episodes: list[dict]) -> dict:
+    n = len(episodes)
+    n_fall = sum(1 for ep in episodes if ep.get("fail_fall"))
+    n_sl = sum(1 for ep in episodes if ep.get("fail_stance_loss"))
+    n_fail = sum(1 for ep in episodes if ep.get("failed"))
+    return {
+        "n": n,
+        "n_fail": n_fail,
+        "fail_rate": n_fail / n if n else 0.0,
+        "n_fall": n_fall,
+        "fall_rate": n_fall / n if n else 0.0,
+        "n_stance_loss": n_sl,
+        "stance_loss_rate": n_sl / n if n else 0.0,
+        "fail_rate_ci95": list(wilson_ci(n_fail, n)),
+        "fall_rate_ci95": list(wilson_ci(n_fall, n)),
+        "stance_loss_rate_ci95": list(wilson_ci(n_sl, n)),
+        "episodes": [criteria_episode(ep) for ep in episodes],
+    }
+
+
+def print_criteria_rates(prefix: str, counts: dict) -> None:
+    n = int(counts["n"])
+    lo, hi = counts.get("fail_rate_ci95") or wilson_ci(int(counts["n_fail"]), n)
+    print(
+        f"{prefix}fail={counts['n_fail']}/{n}={counts['fail_rate'] * 100:.1f}% "
+        f"CI95[{lo * 100:.1f},{hi * 100:.1f}]  "
+        f"fall={counts['n_fall']}/{n}={counts['fall_rate'] * 100:.1f}%  "
+        f"stance_loss={counts['n_stance_loss']}/{n}={counts['stance_loss_rate'] * 100:.1f}%"
+    )
+
+
+def frac_fail_rate(episodes: list[dict], frac: float, z_ref: float) -> dict:
+    z_lim = float(frac) * float(z_ref)
+    n = 0
+    n_fail = 0
+    n_z = 0
+    for ep in episodes:
+        fall = bool(ep.get("fail_fall"))
+        z_s = ep.get("z_settle", ep.get("z_after_settle"))
+        z_hit = z_s is not None and float(z_s) < z_lim
+        n += 1
+        if z_hit:
+            n_z += 1
+        if fall or z_hit:
+            n_fail += 1
+    return {
+        "frac": frac,
+        "z_lim": z_lim,
+        "n": n,
+        "fail_rate": n_fail / n if n else 0.0,
+        "z_hit_rate": n_z / n if n else 0.0,
+        "fail_rate_ci95": list(wilson_ci(n_fail, n)),
+    }
+
+
+def run_named_batch(
+    target_qpos: np.ndarray,
+    kp: float,
+    kd: float,
+    specs: list[tuple[int, float, float]],
+    factor: dict | None = None,
+) -> dict:
+    return run_stress_batch_parallel(specs, kp, kd, False, target_qpos, factor=factor)
+
+
+def run_criteria_analysis(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    kp: float,
+    kd: float,
+) -> dict:
+    z_ref = float(STANCE_REF["z"] or 0.0)
+    print("\nкритерий сбоя: fail = fall OR stance_loss")
+    print("  fall: |крен| или |тангаж| > 45° либо касание корпусом пола (z < 0.12 м)")
+    print("  stance_loss: z_settle или slip (лапы относительно корпуса) за порогами nominal")
+    print("  degradation не используется: −3% от z_ref лежит внутри порога stance_loss")
+    print(f"\nкалибровка stance_loss: {N_THRESHOLD_EPISODES} nominal эпизодов")
+    STANCE_THRESH["z_threshold"] = None
+    STANCE_THRESH["slip_threshold"] = None
+    specs = generate_episode_specs(
+        N_THRESHOLD_EPISODES,
+        SEED,
+        SCENARIOS["nominal"]["friction_range"],
+        SCENARIOS["nominal"]["lateral_force_range"],
+    )
+    nom = run_named_batch(target_qpos, kp, kd, specs)
+    derivation = fit_outcome_thresholds(nom["episodes"], z_ref)
+    relabel_outcomes(nom["episodes"])
+    nom_counts = outcome_counts(nom["episodes"])
+    print(
+        f"  z_settle min={derivation['z_settle_min']:.4f} σ={derivation['z_settle_std']:.4f} "
+        f"порог={derivation['z_threshold']:.4f}"
+    )
+    print(
+        f"  slip max={derivation['slip_max']:.4f} σ={derivation['slip_std']:.4f} "
+        f"порог={derivation['slip_threshold']:.4f}"
+    )
+    print_criteria_rates("  nominal после порога: ", nom_counts)
+    write_json(THRESHOLDS_PATH, derivation)
+
+    cells = {"nominal": nom}
+    ice_specs = {}
+    for mu in (0.1, 0.2):
+        for fy in (0.0, 100.0, 200.0):
+            key = f"ice_mu{mu}_fy{fy:.0f}"
+            specs_i = [(ep, mu, fy) for ep in range(1, 101)]
+            batch = run_named_batch(target_qpos, kp, kd, specs_i)
+            relabel_outcomes(batch["episodes"])
+            cells[key] = batch
+            c = outcome_counts(batch["episodes"])
+            print_criteria_rates(f"  {key}: ", c)
+            ice_specs[key] = c
+    bias_specs = generate_episode_specs(
+        100,
+        SEED,
+        SCENARIOS["nominal"]["friction_range"],
+        SCENARIOS["nominal"]["lateral_force_range"],
+    )
+    bias = run_named_batch(
+        target_qpos,
+        kp,
+        kd,
+        bias_specs,
+        factor={"kind": "bias", "q": 0.05, "drift": 0.0},
+    )
+    relabel_outcomes(bias["episodes"])
+    cells["bias_0.05"] = bias
+    bias_counts = outcome_counts(bias["episodes"])
+    print_criteria_rates("  bias+0.05: ", bias_counts)
+
+    fracs = [round(x, 2) for x in np.arange(0.85, 0.991, 0.02)]
+    sensitivity = []
+    series = []
+    names = ["nominal", "ice_mu0.1_fy0", "ice_mu0.1_fy100", "ice_mu0.1_fy200",
+             "ice_mu0.2_fy0", "ice_mu0.2_fy100", "ice_mu0.2_fy200", "bias_0.05"]
+    print("\nдиагностика порога по z (не критерий сбоя): fall ИЛИ z_settle < frac·z_ref")
+    header = "frac  " + "  ".join(f"{n:>16}" for n in names)
+    print(header)
+    for frac in fracs:
+        row = {"frac": frac}
+        for name in names:
+            stats = frac_fail_rate(cells[name]["episodes"], frac, z_ref)
+            row[name] = stats["fail_rate"]
+            row[f"{name}_ci"] = stats["fail_rate_ci95"]
+        sensitivity.append(row)
+        print(
+            f"{frac:4.2f}  "
+            + "  ".join(f"{row[n]*100:15.1f}%" for n in names)
+        )
+    ice_names = [n for n in names if n.startswith("ice_")]
+    plateau = None
+    for row in sensitivity:
+        if row["nominal"] <= 1e-12 and all(row[k] <= 1e-12 for k in ice_names):
+            plateau = row["frac"]
+    last_nominal_zero = None
+    for row in sensitivity:
+        if row["nominal"] <= 1e-12:
+            last_nominal_zero = row["frac"]
+    if plateau is not None:
+        print(
+            f"плато z-критерия: nominal=0 и лёд=0 до frac={plateau:.2f}; "
+            f"nominal=0 до frac={last_nominal_zero:.2f}"
+        )
+    for name, color in (
+        ("nominal", "#1f4e79"),
+        ("ice_mu0.2_fy0", "#c0392b"),
+        ("ice_mu0.2_fy200", "#8e44ad"),
+        ("bias_0.05", "#1e8449"),
+    ):
+        series.append(
+            {
+                "label": name,
+                "x": [r["frac"] for r in sensitivity],
+                "y": [r[name] for r in sensitivity],
+                "y_lo": [r[f"{name}_ci"][0] for r in sensitivity],
+                "y_hi": [r[f"{name}_ci"][1] for r in sensitivity],
+                "color": color,
+            }
+        )
+    write_line_svg(
+        CRITERIA_SVG_PATH,
+        series,
+        title="Доля сбоев vs frac·z_ref (Уилсон 95%)",
+        xlabel="frac",
+        ylabel="доля сбоев",
+        y_min=0.0,
+        y_max=1.0,
+    )
+    traces = run_ice_nonmonotonic_traces(
+        model, data, target_qpos, friction_geoms, torso_body_id, kp, kd
+    )
+    payload = {
+        "failure_criterion": {
+            "fail": "fall OR stance_loss",
+            "fall": "abs(roll)>45° or abs(pitch)>45° or body z<0.12 m",
+            "stance_loss": "z_settle < z_threshold OR slip > slip_threshold",
+            "slip": "max foot xy displacement relative to body",
+            "measure": f"{POST_IMPACT_MEASURE_S:.2f}s after impulse_end",
+        },
+        "degradation": {
+            "used": False,
+            "reason": (
+                "порог −3% от z_ref лежит ниже z_threshold (min−3σ), "
+                "событие вложено в stance_loss и в fail не входит"
+            ),
+        },
+        "z_ref": z_ref,
+        "thresholds": derivation,
+        "nominal": nom_counts,
+        "ice": ice_specs,
+        "bias_0.05": bias_counts,
+        "sensitivity": sensitivity,
+        "plateau_nominal_zero_and_ice_zero_frac": plateau,
+        "last_nominal_zero_frac": last_nominal_zero,
+        "sensitivity_svg": str(CRITERIA_SVG_PATH),
+        "ice_traces": traces,
+        "seed": SEED,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "kp": kp,
+        "kd": kd,
+        "post_impact_measure_s": POST_IMPACT_MEASURE_S,
+    }
+    write_json(Path("reports") / "criteria_analysis.json", payload)
+    return payload
+
+
+def run_ice_nonmonotonic_traces(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    kp: float,
+    kd: float,
+) -> dict:
+    foot_ids = find_foot_geom_ids(model)
+    forces = (150.0, 250.0, 350.0)
+    print("\nдиагностика μ=0.2: z, крен, лапы/корпус, скорость при Fy=150/250/350")
+    traces = []
+    for fy in forces:
+        for ep in range(1, 4):
+            result = simulate_episode(
+                model,
+                data,
+                target_qpos,
+                friction_geoms,
+                torso_body_id,
+                0.2,
+                float(fy),
+                kp,
+                kd,
+                episode=ep,
+                jitter=True,
+                record_trace=True,
+                foot_ids=foot_ids,
+            )
+            dt = float(model.opt.timestep)
+            t = [dt * i for i in range(1, result["n_steps"] + 1)]
+            rel = np.asarray(result["foot_rel"], dtype=float) if result["foot_rel"] else np.zeros((0, 8))
+            spread = []
+            if rel.size:
+                for row in rel:
+                    d = [
+                        math.hypot(row[i], row[i + 1])
+                        for i in range(0, min(8, row.size), 2)
+                    ]
+                    spread.append(float(np.mean(d)) if d else 0.0)
+            traces.append(
+                {
+                    **criteria_episode(result),
+                    "fy": fy,
+                    "t": t,
+                    "z": result["z"],
+                    "roll_deg": [math.degrees(v) for v in result["roll"]],
+                    "speed": result["speed"],
+                    "foot_spread": spread,
+                }
+            )
+            print(
+                f"  Fy={fy:.0f} ep={ep}: fall={result.get('fail_fall')} "
+                f"stance_loss={result.get('fail_stance_loss')} "
+                f"z_settle={result.get('z_settle')} "
+                f"slip_rel={result.get('foot_slip_rel')} "
+                f"min_z={result['min_z']:.4f}"
+            )
+    colors = {150.0: "#1f4e79", 250.0: "#c0392b", 350.0: "#1e8449"}
+    def series_for(key, ylabel, path, scale=None):
+        ser = []
+        for fy in forces:
+            item = next(tr for tr in traces if tr["fy"] == fy and tr["episode"] == 1)
+            ys = item[key]
+            if scale:
+                ys = [scale(v) for v in ys]
+            ser.append(
+                {
+                    "label": f"Fy={fy:g} ep1",
+                    "x": item["t"],
+                    "y": ys,
+                    "color": colors[fy],
+                }
+            )
+        write_line_svg(path, ser, title=ylabel, xlabel="t, с", ylabel=ylabel)
+        return str(path)
+
+    paths = {
+        "z": series_for("z", "μ=0.2 z(t)", ICE_TRACE_DIR / "ice_mu02_z.svg"),
+        "roll": series_for("roll_deg", "μ=0.2 крен, град", ICE_TRACE_DIR / "ice_mu02_roll.svg"),
+        "speed": series_for("speed", "μ=0.2 скорость корпуса, м/с", ICE_TRACE_DIR / "ice_mu02_speed.svg"),
+        "spread": series_for(
+            "foot_spread",
+            "μ=0.2 среднее |стопа−корпус| xy, м",
+            ICE_TRACE_DIR / "ice_mu02_foot_rel.svg",
+        ),
+    }
+    compact_traces = []
+    for tr in traces:
+        row = {k: v for k, v in tr.items() if k not in ("t", "z", "roll_deg", "speed", "foot_spread")}
+        compact_traces.append(row)
+    return {"episodes": compact_traces, "paths": paths}
+
+
+def evaluate_fall_flags(
+    target_qpos: np.ndarray,
+    kp: float,
+    kd: float,
+    mu: float,
+    fy_mag: float,
+    n_episodes: int,
+    factor: dict | None = None,
+) -> list[int]:
+    specs = [(ep, float(mu), float(fy_mag)) for ep in range(1, n_episodes + 1)]
+    batch = run_named_batch(target_qpos, kp, kd, specs, factor=factor)
+    by_ep = {int(ep["episode"]): ep for ep in batch["episodes"]}
+    flags = []
+    for ep in range(1, n_episodes + 1):
+        row = by_ep.get(ep, {})
+        flags.append(1 if row.get("fail_fall") or row.get("fail_tilt") else 0)
+    return flags
+
+
+def interpolate_crossing(points: list[tuple[float, float]], p_target: float) -> float:
+    pts = sorted(points, key=lambda p: p[0])
+    if not pts:
+        return float("nan")
+    if pts[0][1] >= p_target:
+        return pts[0][0]
+    if pts[-1][1] < p_target:
+        return pts[-1][0]
+    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
+        if y0 <= p_target <= y1 or y1 <= p_target <= y0:
+            if abs(y1 - y0) < 1e-12:
+                return 0.5 * (x0 + x1)
+            t = (p_target - y0) / (y1 - y0)
+            return x0 + t * (x1 - x0)
+    return pts[-1][0]
+
+
+def fy_crit_search(
+    target_qpos: np.ndarray,
+    kp: float,
+    kd: float,
+    *,
+    mu: float = 0.8,
+    p_target: float = 0.5,
+    n_episodes: int = FY_CRIT_N_EPISODES,
+    n_iter: int = FY_CRIT_ITERS,
+    factor: dict | None = None,
+) -> dict:
+    lo, hi = FY_CRIT_LO, FY_CRIT_HI
+    probes: list[dict] = []
+    print(f"  Fy_crit p={p_target:.2f} μ={mu:g} n={n_episodes} iter={n_iter}")
+    for i in range(n_iter):
+        mid = 0.5 * (lo + hi)
+        flags = evaluate_fall_flags(
+            target_qpos, kp, kd, mu, mid, n_episodes, factor=factor
+        )
+        p = float(np.mean(flags))
+        probes.append({"fy": mid, "p": p, "flags": flags})
+        print(f"    iter {i+1}: |Fy|={mid:.2f} Н  p_fall={p*100:.1f}%")
+        if p < p_target:
+            lo = mid
+        else:
+            hi = mid
+    points = [(float(pr["fy"]), float(pr["p"])) for pr in probes]
+    fy_hat = interpolate_crossing(points, p_target)
+    rng = np.random.default_rng(SEED + 17)
+    n = n_episodes
+    boot = []
+    flag_mat = np.array([pr["flags"] for pr in probes], dtype=float)
+    fys = np.array([pr["fy"] for pr in probes], dtype=float)
+    for _ in range(FY_CRIT_BOOTSTRAP):
+        idx = rng.integers(0, n, size=n)
+        boot_pts = [
+            (float(fys[j]), float(flag_mat[j, idx].mean()))
+            for j in range(len(probes))
+        ]
+        boot.append(interpolate_crossing(boot_pts, p_target))
+    boot_arr = np.asarray(boot, dtype=float)
+    ci = (float(np.percentile(boot_arr, 2.5)), float(np.percentile(boot_arr, 97.5)))
+    return {
+        "p_target": p_target,
+        "mu": mu,
+        "fy_crit": fy_hat,
+        "ci95": list(ci),
+        "n_episodes": n_episodes,
+        "n_iter": n_iter,
+        "n_bootstrap": FY_CRIT_BOOTSTRAP,
+        "probes": [{"fy": pr["fy"], "p": pr["p"]} for pr in probes],
+        "impulse_realistic": bool(IMPULSE_CFG.get("realistic")),
+    }
+
+
+def run_fycrit_ofat(
+    target_qpos: np.ndarray,
+    kp: float,
+    kd: float,
+) -> dict:
+    print("\nширина перехода до реалистичного импульса (сила вдоль Y)")
+    IMPULSE_CFG["realistic"] = False
+    before_10 = fy_crit_search(target_qpos, kp, kd, p_target=0.1)
+    before_50 = fy_crit_search(target_qpos, kp, kd, p_target=0.5)
+    before_90 = fy_crit_search(target_qpos, kp, kd, p_target=0.9)
+    width_before = before_90["fy_crit"] - before_10["fy_crit"]
+    print(
+        f"  до: Fy10={before_10['fy_crit']:.1f} Fy50={before_50['fy_crit']:.1f} "
+        f"Fy90={before_90['fy_crit']:.1f} ширина={width_before:.1f} Н"
+    )
+    print("\nреалистичный импульс: случайное направление, высота ±3 см, длительность ±20%")
+    IMPULSE_CFG["realistic"] = True
+    after_10 = fy_crit_search(target_qpos, kp, kd, p_target=0.1)
+    after_50 = fy_crit_search(target_qpos, kp, kd, p_target=0.5)
+    after_90 = fy_crit_search(target_qpos, kp, kd, p_target=0.9)
+    width_after = after_90["fy_crit"] - after_10["fy_crit"]
+    print(
+        f"  после: Fy10={after_10['fy_crit']:.1f} Fy50={after_50['fy_crit']:.1f} "
+        f"Fy90={after_90['fy_crit']:.1f} ширина={width_after:.1f} Н"
+    )
+    base = after_50
+    print("\nOFAT Fy_crit, база μ=0.8, реалистичный импульс")
+    parameters = []
+    no_effect = []
+    for spec in PARAMETER_SWEEPS:
+        if spec["id"] == "torque_limit":
+            print("  torque_limit: пропущен (не трогаем на этом шаге)")
+            continue
+        print(f"  {spec['name']}:")
+        levels_out = []
+        for level in spec["levels"]:
+            est = fy_crit_search(
+                target_qpos, kp, kd, factor=level["factor"]
+            )
+            delta = est["fy_crit"] - base["fy_crit"]
+            pct = 100.0 * delta / base["fy_crit"] if abs(base["fy_crit"]) > 1e-9 else 0.0
+            overlap = not (
+                est["ci95"][1] < base["ci95"][0] or est["ci95"][0] > base["ci95"][1]
+            )
+            significant = not overlap
+            row = {
+                "id": level["id"],
+                "label": level["label"],
+                "fy_crit": est["fy_crit"],
+                "ci95": est["ci95"],
+                "delta_n": delta,
+                "delta_pct": pct,
+                "significant": significant,
+                "ci_overlap_with_base": overlap,
+            }
+            levels_out.append(row)
+            mark = "значимо" if significant else "в пределах шума"
+            print(
+                f"    {level['label']}: Fy_crit={est['fy_crit']:.1f} Н "
+                f"CI[{est['ci95'][0]:.1f},{est['ci95'][1]:.1f}] "
+                f"Δ={delta:+.1f} Н ({pct:+.1f}%) {mark}"
+            )
+        baseline_level = next(
+            (lv for lv in levels_out if lv["id"] == spec["baseline"]), levels_out[0]
+        )
+        if not any(lv["significant"] and lv["id"] != baseline_level["id"] for lv in levels_out):
+            no_effect.append(spec["id"])
+        parameters.append(
+            {
+                "id": spec["id"],
+                "name": spec["name"],
+                "baseline": spec["baseline"],
+                "levels": levels_out,
+            }
+        )
+    payload = {
+        "mu": 0.8,
+        "kp": kp,
+        "kd": kd,
+        "seed": SEED,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "impulse": dict(IMPULSE_CFG),
+        "transition_before": {
+            "fy10": before_10,
+            "fy50": before_50,
+            "fy90": before_90,
+            "width_n": width_before,
+        },
+        "transition_after": {
+            "fy10": after_10,
+            "fy50": after_50,
+            "fy90": after_90,
+            "width_n": width_after,
+        },
+        "base_fy_crit": base,
+        "parameters": parameters,
+        "no_significant_effect": no_effect,
+    }
+    write_json(FYCRIT_PATH, payload)
+    print("без значимого эффекта:", ", ".join(no_effect) or "нет")
+    IMPULSE_CFG["realistic"] = False
+    return payload
+
+
+def compute_contact_ff(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    friction_geoms: list[int],
+) -> np.ndarray:
+    reset_to_stance(model, data)
+    set_sliding_friction(model, friction_geoms, 1.0)
+    mujoco.mj_forward(model, data)
+    nu = int(model.nu)
+    return np.asarray(data.qfrc_bias[6 : 6 + nu] - data.qfrc_constraint[6 : 6 + nu], dtype=float)
+
+
+def run_pd_ff_variant(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    kp: float,
+    kd: float,
+) -> dict:
+    tau = compute_contact_ff(model, data, friction_geoms)
+    print("\nвариант pd_ff: tau_ff = qfrc_bias − qfrc_constraint (dof ног), база не меняется")
+    print(f"  |tau_ff| mean={float(np.mean(np.abs(tau))):.3f} max={float(np.max(np.abs(tau))):.3f} Н·м")
+    hold = hold_stance_for_ff(
+        model, data, target_qpos, friction_geoms, torso_body_id, kp, kd, 750, "none"
+    )
+    reset_to_stance(model, data)
+    set_sliding_friction(model, friction_geoms, 1.0)
+    mujoco.mj_forward(model, data)
+    for _ in range(750):
+        apply_pd(model, data, target_qpos, kp=kp, kd=kd, gravity_ff=False, ff_ctrl=tau)
+        mujoco.mj_step(model, data)
+    z_ff = float(data.qpos[2])
+    print(f"  высота базы={hold['z_end']:.4f}  pd_ff={z_ff:.4f}")
+    factor = {"kind": "pd_variant", "ctrl": {"ff_ctrl": tau.tolist()}}
+    IMPULSE_CFG["realistic"] = True
+    base_crit = fy_crit_search(target_qpos, kp, kd, p_target=0.5)
+    ff_crit = fy_crit_search(target_qpos, kp, kd, p_target=0.5, factor=factor)
+    IMPULSE_CFG["realistic"] = False
+    payload = {
+        "kp": kp,
+        "kd": kd,
+        "tau_ff_abs_mean": float(np.mean(np.abs(tau))),
+        "tau_ff_abs_max": float(np.max(np.abs(tau))),
+        "z_base": hold["z_end"],
+        "z_pd_ff": z_ff,
+        "fy_crit_base": base_crit,
+        "fy_crit_pd_ff": ff_crit,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "note": "вариант контроллера, база kp=40 kd=3 без FF не изменена",
+    }
+    write_json(Path("reports") / "pd_ff_compare.json", payload)
+    print(
+        f"  Fy_crit база={base_crit['fy_crit']:.1f} "
+        f"pd_ff={ff_crit['fy_crit']:.1f} Н"
+    )
+    return payload
+
+
+def load_outcome_thresholds() -> dict | None:
+    if not THRESHOLDS_PATH.exists():
+        print(f"нет {THRESHOLDS_PATH}, stance_loss без калибровки 3σ")
+        return None
+    derivation = json.loads(THRESHOLDS_PATH.read_text(encoding="utf-8"))
+    STANCE_THRESH.update(
+        {
+            "z_threshold": derivation["z_threshold"],
+            "slip_threshold": derivation["slip_threshold"],
+            "z_ref": derivation["z_ref"],
+            "n": int(derivation.get("n_nominal") or 0),
+            "derivation": derivation,
+        }
+    )
+    STANCE_REF["z"] = float(derivation["z_ref"])
+    print(
+        f"пороги stance_loss из {THRESHOLDS_PATH}: "
+        f"z<{derivation['z_threshold']:.4f} м  slip>{derivation['slip_threshold']:.4f} м"
+    )
+    return derivation
+
+
+def torque_level_stats(batch: dict) -> dict:
+    episodes = batch.get("episodes") or []
+    compact = [torque_episode(ep) for ep in episodes]
+    n = len(compact) if compact else int(batch.get("n_episodes") or 0)
+    n_fail = sum(1 for ep in compact if ep["fail"]) if compact else int(batch.get("n_failures") or 0)
+    n_fall = sum(1 for ep in compact if ep["fall"]) if compact else int(batch.get("n_fall") or batch.get("n_tilt") or 0)
+    n_sl = sum(1 for ep in compact if ep["stance_loss"]) if compact else int(batch.get("n_stance_loss") or 0)
+    tau = [float(ep["max_tau_over_limit"]) for ep in compact if ep.get("max_tau_over_limit") is not None]
+    sat = [float(ep["saturation_frac"]) for ep in compact if ep.get("saturation_frac") is not None]
+    z_s = [float(ep["z_settle"]) for ep in compact if ep.get("z_settle") is not None]
+    sat_mean = float(np.mean(sat)) if sat else 0.0
+    return {
+        "n": n,
+        "n_fail": n_fail,
+        "fail_rate": n_fail / n if n else 0.0,
+        "n_fall": n_fall,
+        "fall_rate": n_fall / n if n else 0.0,
+        "n_stance_loss": n_sl,
+        "stance_loss_rate": n_sl / n if n else 0.0,
+        "fail_rate_ci95": list(wilson_ci(n_fail, n)),
+        "fall_rate_ci95": list(wilson_ci(n_fall, n)),
+        "stance_loss_rate_ci95": list(wilson_ci(n_sl, n)),
+        "max_tau_over_limit_mean": float(np.mean(tau)) if tau else None,
+        "max_tau_over_limit_max": float(np.max(tau)) if tau else None,
+        "saturation_frac_mean": sat_mean if sat else None,
+        "saturation_frac_max": float(np.max(sat)) if sat else None,
+        "limit_reached": bool(sat) and sat_mean > 1e-12,
+        "limit_note": saturation_note(sat_mean if sat else 0.0),
+        "z_settle_mean": float(np.mean(z_s)) if z_s else None,
+        "n_hit_limit": sum(1 for ep in compact if ep.get("hit_limit")),
+        "episodes": compact,
+    }
+
+
+def run_torque_scale_sample(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    kp: float,
+    kd: float,
+    scale: float,
+    n_episodes: int = 3,
+    friction: float = 0.8,
+    lateral_force: float = 0.0,
+) -> list[dict]:
+    apply_torque_limit(model, scale)
+    foot_ids = find_foot_geom_ids(model)
+    rows = []
+    for ep in range(1, int(n_episodes) + 1):
+        result = simulate_episode(
+            model,
+            data,
+            target_qpos,
+            friction_geoms,
+            torso_body_id,
+            float(friction),
+            float(lateral_force),
+            kp,
+            kd,
+            episode=ep,
+            jitter=True,
+            record_trace=False,
+            factor={"kind": "torque_limit", "scale": float(scale)},
+            foot_ids=foot_ids,
+        )
+        rows.append(torque_episode(result))
+    apply_torque_limit(model, 1.0)
+    return rows
+
+
+def run_torque_limit_test(
+    model: mujoco.MjModel,
+    data: mujoco.MjData,
+    target_qpos: np.ndarray,
+    friction_geoms: list[int],
+    torso_body_id: int,
+    kp: float,
+    kd: float,
+) -> dict:
+    stock = stock_ctrlrange(model)
+    print("\nпроверка torque_limit: клип ctrl к actuator_ctrlrange, ctrllimited=1")
+    print(
+        f"  штатный ctrlrange hip=[{stock[0, 0]:.2f},{stock[0, 1]:.2f}] "
+        f"calf=[{stock[2, 0]:.2f},{stock[2, 1]:.2f}]  "
+        f"ctrllimited={bool(np.all(model.actuator_ctrllimited))}"
+    )
+    derivation = load_outcome_thresholds()
+    probe_rows = probe_torque_limit(
+        model, data, target_qpos, friction_geoms, torso_body_id, kp, kd
+    )
+    specs = generate_episode_specs(
+        N_TORQUE_EPISODES,
+        SEED,
+        SCENARIOS["nominal"]["friction_range"],
+        SCENARIOS["nominal"]["lateral_force_range"],
+    )
+    print(
+        f"\nбатч torque_limit: {N_TORQUE_EPISODES} nominal эпизодов, "
+        f"общие seed, шкалы {list(TORQUE_TEST_SCALES)}"
+    )
+    levels = []
+    for scale in TORQUE_TEST_SCALES:
+        written = apply_torque_limit(model, scale)
+        batch = run_named_batch(
+            target_qpos,
+            kp,
+            kd,
+            specs,
+            factor={"kind": "torque_limit", "scale": scale},
+        )
+        stats = torque_level_stats(batch)
+        row = {
+            "scale": scale,
+            "label": f"{scale * 100:.0f}%",
+            "ctrlrange_hip": [float(written[0, 0]), float(written[0, 1])],
+            "ctrlrange_calf": [float(written[2, 0]), float(written[2, 1])],
+            **stats,
+        }
+        levels.append(row)
+        tau = row["max_tau_over_limit_mean"]
+        sat = row["saturation_frac_mean"]
+        print(
+            f"  {row['label']:>4}  hip_lim={abs(written[0, 0]):.2f} Н·м  "
+            f"calf_lim={abs(written[2, 0]):.2f} Н·м  "
+            f"max|tau|/limit={0.0 if tau is None else tau:.3f}  "
+            f"sat={format_sat_pct(sat)} ({row['limit_note']})  "
+            f"fail={row['n_fail']}/{row['n']}={row['fail_rate']*100:.1f}%  "
+            f"fall={row['n_fall']}/{row['n']}={row['fall_rate']*100:.1f}%  "
+            f"stance_loss={row['n_stance_loss']}/{row['n']}={row['stance_loss_rate']*100:.1f}%  "
+            f"z_settle={0.0 if row['z_settle_mean'] is None else row['z_settle_mean']:.4f}"
+        )
+    apply_torque_limit(model, 1.0)
+    base = next(lv for lv in levels if abs(lv["scale"] - 1.0) < 1e-12)
+    harsh = next(lv for lv in levels if abs(lv["scale"] - 0.05) < 1e-12)
+    changed = (
+        abs((harsh["fail_rate"] or 0.0) - (base["fail_rate"] or 0.0)) > 1e-9
+        or abs((harsh["saturation_frac_mean"] or 0.0) - (base["saturation_frac_mean"] or 0.0)) > 1e-4
+        or abs((harsh["z_settle_mean"] or 0.0) - (base["z_settle_mean"] or 0.0)) > 0.005
+    )
+    if changed:
+        print("  5% меняет насыщение и/или сбои относительно 100%")
+    else:
+        print("  предупреждение: 5% не отличился от 100% по fail/sat/z")
+    payload = {
+        "kp": kp,
+        "kd": kd,
+        "seed": SEED,
+        "n_episodes": N_TORQUE_EPISODES,
+        "scenario": "nominal",
+        "failure_criterion": "fall OR stance_loss",
+        "stock_ctrlrange_hip": [float(stock[0, 0]), float(stock[0, 1])],
+        "stock_ctrlrange_calf": [float(stock[2, 0]), float(stock[2, 1])],
+        "ctrllimited": True,
+        "thresholds": derivation,
+        "probe": probe_rows,
+        "levels": levels,
+        "changed_at_5pct": changed,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    write_json(TORQUE_TEST_PATH, payload)
+    return payload
+
+
 def main() -> None:
+    global ACTIVE_CONTROLLER, REPORT_PATH
     args = parse_args()
+    if args.report:
+        REPORT_PATH = Path(args.report)
+    if args.compare:
+        from paired_compare import run_compare_files
+
+        run_compare_files(args.compare[0], args.compare[1], args.compare_out)
+        return
     run_mode = args.mode
     pd_name = args.pd
     scenario = SCENARIOS[args.scenario]
     mode = PD_MODES[pd_name]
     main_kp = float(mode["kp"])
     main_kd = float(mode["kd"])
+    ACTIVE_CONTROLLER, _import_root = prepare_controller_spec(str(args.controller))
+    make_controller(ACTIVE_CONTROLLER, main_kp, main_kd)
 
     model = mujoco.MjModel.from_xml_path(MODEL_PATH)
     data = mujoco.MjData(model)
@@ -3374,7 +4871,12 @@ def main() -> None:
         f"проба Fy={scenario['probe_force']:.1f} Н"
     )
     print(f"основной PD: {pd_name} kp={main_kp:g} kd={main_kd:g}")
-    print(f"seed={SEED}  N_ENVS={N_ENVS}  CHUNK_SIZE={CHUNK_SIZE}")
+    print(f"контроллер: {ACTIVE_CONTROLLER}")
+    n_episodes = max(1, int(args.episodes))
+    print(
+        f"seed={SEED}  N_ENVS={N_ENVS}  CHUNK_SIZE={CHUNK_SIZE}  "
+        f"--episodes={n_episodes}"
+    )
 
     reset_to_stance(model, data)
     target_qpos = np.array(data.qpos[7:], copy=True)
@@ -3392,11 +4894,20 @@ def main() -> None:
         float(PD_MODES["baseline"]["kp"]),
         float(PD_MODES["baseline"]["kd"]),
         float(args.stance_loss_frac),
+        announce_frac_rule=(run_mode not in ("criteria", "torque", "ofat")),
     )
+    measured_z_ref = STANCE_REF.get("z")
+    measured_frac = STANCE_REF.get("frac")
     extra_config = {
         "stance_ref_z": STANCE_REF["z"],
-        "stance_loss_frac": STANCE_REF["frac"],
+        "n_episodes": n_episodes,
     }
+    if run_mode in ("criteria", "torque", "ofat", "full", "quick"):
+        extra_config["failure_criterion"] = "fall OR stance_loss"
+    if run_mode not in ("criteria", "torque"):
+        extra_config["stance_loss_frac"] = STANCE_REF["frac"]
+    if run_mode in ("full", "quick", "ofat"):
+        load_outcome_thresholds()
     config_meta = build_config_meta(
         kp=main_kp, kd=main_kd, scenario=scenario, extra=extra_config
     )
@@ -3404,6 +4915,24 @@ def main() -> None:
 
     if run_mode == "ff":
         run_gravity_ff_diagnosis(
+            model, data, target_qpos, friction_geoms, torso_body_id, main_kp, main_kd
+        )
+        return
+    if run_mode == "criteria":
+        run_criteria_analysis(
+            model, data, target_qpos, friction_geoms, torso_body_id, main_kp, main_kd
+        )
+        return
+    if run_mode == "fycrit":
+        run_fycrit_ofat(target_qpos, main_kp, main_kd)
+        return
+    if run_mode == "pd_ff":
+        run_pd_ff_variant(
+            model, data, target_qpos, friction_geoms, torso_body_id, main_kp, main_kd
+        )
+        return
+    if run_mode == "torque":
+        run_torque_limit_test(
             model, data, target_qpos, friction_geoms, torso_body_id, main_kp, main_kd
         )
         return
@@ -3495,7 +5024,7 @@ def main() -> None:
     }
     main_batch = None
     if run_mode == "full":
-        specs = generate_episode_specs(N_ENVS, SEED, **episode_specs_kwargs)
+        specs = generate_episode_specs(n_episodes, SEED, **episode_specs_kwargs)
         main_batch = run_pd_comparison(
             model,
             data,
@@ -3506,7 +5035,7 @@ def main() -> None:
             pd_name,
         )
     elif run_mode == "quick":
-        specs = generate_episode_specs(N_ENVS, SEED, **episode_specs_kwargs)
+        specs = generate_episode_specs(n_episodes, SEED, **episode_specs_kwargs)
         main_batch = run_stress_batch_parallel(
             specs,
             main_kp,
@@ -3525,7 +5054,9 @@ def main() -> None:
                     f"OFAT от сценария {ofat_scenario['id']} "
                     f"({ofat_scenario['label']}), не от {scenario['id']}"
                 )
-            one = run_parameter_sweeps(target_qpos, main_kp, main_kd, ofat_scenario)
+            one = run_parameter_sweeps(
+                target_qpos, main_kp, main_kd, ofat_scenario, n_episodes=n_episodes
+            )
             sweeps_by_scenario.append(one)
         if sweeps_by_scenario:
             sweeps = sweeps_by_scenario[0]
@@ -3553,8 +5084,23 @@ def main() -> None:
         "impulse_end": IMPULSE_END,
         "target_qpos": target_qpos.tolist(),
     }
+    stance_meta = stance_reference_record(
+        ACTIVE_CONTROLLER,
+        pd_name,
+        main_kp,
+        main_kd,
+        measured_z_ref,
+        measured_frac,
+    )
+    report["controller"] = ACTIVE_CONTROLLER
+    report["stance_reference"] = stance_meta
     if main_batch is not None:
-        print_main_batch_summary(pd_name, main_batch)
+        print_main_batch_summary(
+            pd_name,
+            main_batch,
+            controller=ACTIVE_CONTROLLER,
+            stance=stance_meta,
+        )
         report.update(
             report_from_batch(
                 pd_name,

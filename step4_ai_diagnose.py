@@ -1,13 +1,18 @@
 import json
+import math
 import os
-from collections import Counter, deque
+from collections import Counter, defaultdict, deque
 from pathlib import Path
 
 import numpy as np
 
 FAILURES_PATH = Path("reports") / "batch_failures.json"
 REPORT_PATH = Path("reports") / "final_diagnosis.md"
+RECS_JSON_PATH = Path("reports") / "step4_recommendations.json"
 GEMINI_MODEL = "gemini-2.0-flash"
+FAIL_RATE_THRESHOLD = 0.10
+VERIFY_TOP_K = 3
+WILSON_Z = 1.959963984540054
 
 ROLL_RATE_THRESHOLD = 2.5
 SLIP_FRICTION_THRESHOLD = 0.15
@@ -164,6 +169,7 @@ def classify_episodes(payload: dict) -> list[dict]:
                 "impulse_end": impulse_end,
                 "impact_phase": phase,
                 "fail_vs_impulse": fail_vs_impulse(fail_step, impulse_start, impulse_end),
+                "fail_reason": ep.get("fail_reason"),
                 "category": category,
                 **metrics,
             }
@@ -348,296 +354,1046 @@ def pick_examples(episodes: list[dict], limit: int = 3) -> list[dict]:
     return picked[:limit]
 
 
-def controller_recommendations(stats: list[tuple[str, int, int, float]]) -> list[str]:
-    _ = stats
-    return [
-        "Добавить контур по ориентации корпуса (PD по крену и тангажу), а не только по углам суставов: текущий регулятор не видит угловую скорость корпуса.",
-        "При большом |qvel[3]| расширять опору (hip abduction) и гасить крен, не увеличивая kp ног вслепую.",
-        "На низком трении ограничивать горизонтальную силу стоп и снижать kp: жёсткая стойка на льду разгоняет проскальзывание.",
-        "Оценивать скольжение по росту скорости корпуса без роста крена и переключать режим: мягче на скользком, жёстче при ударе.",
-        "В коленях добавить компенсацию тяжести, чтобы стойка меньше проседала до удара.",
-    ]
-
-
-SWEEP_FIXES = {
-    "com_x": (
-        "Не смещать COM вдоль корпуса: в `go2.xml` у body `base` поле `inertial pos` "
-        "(ось X, это `body_ipos[0]`). Проверять и −X, и +X (например ±0.03 м). "
-        "Сдвиг вперёд (+X) тянет на нос, назад (−X) — на задние лапы; "
-        "в железе не выносить батарею или груз вдоль корпуса."
-    ),
-    "com_y": (
-        "Ограничить боковое смещение COM в обе стороны: в `go2.xml` у body `base` "
-        "поле `inertial pos` (это `body_ipos`). Проверять и +Y, и −Y "
-        "(например ±0.02 м и ±0.04 м), не сдвигать |Y| больше чем на ~1–2 см. "
-        "В железе не смещать батарею или нагрузку ни влево, ни вправо."
-    ),
-    "com_z": (
-        "Не задирать COM по Z: тот же `inertial pos` у `base` в `go2.xml`. "
-        "Высокий COM быстрее валит после Fy; держать массу ближе к исходным −0.005 м."
-    ),
-    "torque_limit": (
-        "Не урезать момент моторов без нужды: в `go2.xml` у actuator атрибут "
-        "`ctrlrange` (в рантайме поле `actuator_ctrlrange`). На этом PD 50% часто "
-        "ещё не упирается в лимит, 25% уже режет икроножные (calf). "
-        "Для стенда оставлять штатный 100%; низкий потолок — только если моторы "
-        "реально слабее, и тогда снижать нагрузку или kp, а не только потолок."
-    ),
-    "action_delay": (
-        "Снизить задержку команд до 0–2 шагов: в контуре управления слать `ctrl` "
-        "на каждом `mj_step`, без очереди. В `step3_batch_stress.py` это "
-        "`action_delay` / фактор `delay`."
-    ),
-    "joint_damping": (
-        "Вернуть демпфирование шарниров ног к штатным примерно 2 Н·м·с/рад: "
-        "в `go2.xml` у суставов ног поле `dof_damping` (атрибут damping). "
-        "Нулевой damping даёт лишние колебания и падения до и после удара. "
-        "Усиление в 10 раз зажимает стойку, но меняет динамику."
-    ),
-    "floor_contact": (
-        "Не делать пол слишком податливым. "
-        "Править solref и solimp у пола в scene.xml и у лап FL/FR/RL/RR в go2.xml "
-        "(у лап priority=1, от них MuJoCo берёт контакт). "
-        "Мягкий solref около 0.08 проваливает корпус ещё до удара; "
-        "для стенда ближе к 0.02 и штатному solimp лап."
-    ),
-    "sensor_noise": (
-        "Ограничить шум в измерениях регулятора: фильтровать энкодеры и IMU, "
-        "не добавлять сильный шум в расчёт PD. "
-        "Средний шум 0.03 рад уже портит стойку, сильный 0.12 рад — сильнее."
-    ),
-    "control_hold": (
-        "Не прореживать команды: слать `ctrl` на каждом `mj_step`, без удержания "
-        "старого значения. В `step3_batch_stress.py` это `control_hold` / фактор "
-        "`ctrl_hold`. Обновление раз в 20 шагов (около 25 Гц при dt=0.002) "
-        "делает стойку запаздывающей на ударе; держать один шаг — частоту физики."
-    ),
-    "sensor_bias": (
-        "Калибровать энкодеры и не оставлять постоянное смещение нуля: "
-        "в контуре PD это `obs_bias_q` / дрейф `obs_drift_q`. "
-        "Смещение около ±0.015 рад ещё переходное, +0.05 рад на всех суставах "
-        "уже уводит стойку, нарастающий дрейф валит до и после удара. "
-        "В железе периодически обнулять офсет энкодеров."
-    ),
-}
+def wilson_ci(k: int, n: int, z: float = WILSON_Z) -> tuple[float, float]:
+    if n <= 0:
+        return (float("nan"), float("nan"))
+    p = k / n
+    z2 = z * z
+    den = 1.0 + z2 / n
+    center = (p + z2 / (2.0 * n)) / den
+    half = z * math.sqrt((p * (1.0 - p) + z2 / (4.0 * n)) / n) / den
+    return (max(0.0, center - half), min(1.0, center + half))
 
 
 def sweep_level_rate(level: dict) -> float:
     return _as_float(level.get("failure_rate"))
 
 
-def sweep_param_delta(param: dict) -> float:
-    stored = param.get("worst_delta_vs_baseline")
-    if stored is not None:
-        return _as_float(stored)
-    levels = list(param.get("levels") or [])
-    if not levels:
-        return 0.0
-    baseline_id = param.get("baseline")
-    baseline = next((lv for lv in levels if lv.get("id") == baseline_id), levels[0])
-    worst = max(levels, key=sweep_level_rate)
-    return sweep_level_rate(worst) - sweep_level_rate(baseline)
+def level_counts(level: dict) -> tuple[int, int]:
+    n = _as_int(level.get("n_episodes"))
+    k = _as_int(level.get("n_failures"))
+    if n <= 0:
+        outcomes = level.get("outcomes") or []
+        if outcomes:
+            n = len(outcomes)
+            k = sum(1 for row in outcomes if row.get("failed"))
+    return k, n
 
 
-def format_leader_item(param: dict) -> str:
-    name = param.get("name") or param.get("id")
-    levels = list(param.get("levels") or [])
-    level = param.get("worst_label") or param.get("worst_level")
-    rate = param.get("worst_failure_rate")
-    if rate is None and levels:
-        worst = max(levels, key=sweep_level_rate)
-        rate = sweep_level_rate(worst)
-        level = level or worst.get("label") or worst.get("id")
-    return (
-        f"**{name}** ({level}: {_as_float(rate) * 100:.1f}% сбоев, "
-        f"{sweep_param_delta(param) * 100:+.1f} п.п. к норме)"
-    )
+def level_ci(level: dict) -> tuple[float, float]:
+    stored = level.get("failure_rate_ci95")
+    if isinstance(stored, (list, tuple)) and len(stored) == 2:
+        try:
+            return (float(stored[0]), float(stored[1]))
+        except (TypeError, ValueError):
+            pass
+    k, n = level_counts(level)
+    return wilson_ci(k, n)
 
 
-def collect_sweep_leaders(parameters: list[dict], eps: float = 1e-12) -> list[dict]:
-    scored: list[tuple[float, dict]] = []
-    for param in parameters:
-        if not param.get("levels"):
-            continue
-        scored.append((sweep_param_delta(param), param))
-    if not scored:
+def format_pct(rate: float) -> str:
+    if rate != rate:  # NaN
+        return "н/д"
+    return f"{100.0 * rate:.1f}%"
+
+
+def format_ci(ci: tuple[float, float]) -> str:
+    lo, hi = ci
+    if lo != lo or hi != hi:
+        return "н/д"
+    return f"[{100.0 * lo:.1f}, {100.0 * hi:.1f}]%"
+
+
+def format_p(value) -> str:
+    if value is None:
+        return "—"
+    try:
+        return f"{float(value):.4g}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def delta_vs_baseline(level: dict, base_rate: float) -> float:
+    if level.get("delta_vs_baseline") is not None:
+        return _as_float(level.get("delta_vs_baseline"))
+    return sweep_level_rate(level) - base_rate
+
+
+def effect_kind(level: dict, baseline_id: str | None, base_rate: float) -> str:
+    if baseline_id is not None and level.get("id") == baseline_id:
+        return "baseline"
+    if not level.get("significant"):
+        return "noise"
+    delta = delta_vs_baseline(level, base_rate)
+    if delta > 1e-12:
+        return "harmful"
+    if delta < -1e-12:
+        return "improving"
+    return "noise"
+
+
+def effect_direction_ru(kind: str) -> str:
+    if kind == "harmful":
+        return "усиление сбоев"
+    if kind == "improving":
+        return "ослабление сбоев"
+    if kind == "baseline":
+        return "норма"
+    return "в пределах шума"
+
+
+def axis_samples(level: dict, param_id: str | None = None) -> list[tuple[str, float]]:
+    """Скаляры уровня из payload фактора. Не подставляет зашитые xml-числа."""
+    _ = param_id
+    factor = level.get("factor") or {}
+    kind = str(factor.get("kind") or "")
+    if kind == "com_offset":
+        off = list(factor.get("offset") or [0.0, 0.0, 0.0])
+        while len(off) < 3:
+            off.append(0.0)
+        names = ("x", "y", "z")
+        if param_id == "com_x":
+            return [("x", float(off[0]))]
+        if param_id == "com_y":
+            return [("y", float(off[1]))]
+        if param_id == "com_z":
+            return [("z", float(off[2]))]
+        return [(names[i], float(off[i])) for i in range(3)]
+    if kind == "torque_limit":
+        return [("scale", float(factor.get("scale", 1.0)))]
+    if kind == "delay":
+        return [("steps", float(factor.get("steps", 0)))]
+    if kind == "damping":
+        return [("scale", float(factor.get("scale", 1.0)))]
+    if kind == "contact":
+        solref = factor.get("solref")
+        if isinstance(solref, (list, tuple)) and solref:
+            return [("solref0", float(solref[0]))]
         return []
-    best_delta = max(delta for delta, _ in scored)
-    return [param for delta, param in scored if abs(delta - best_delta) <= eps]
+    if kind == "noise":
+        return [("q", float(factor.get("q") or 0.0))]
+    if kind == "ctrl_hold":
+        return [("steps", float(factor.get("steps", 1)))]
+    if kind == "bias":
+        q = float(factor.get("q") or 0.0)
+        drift = float(factor.get("drift") or 0.0)
+        out: list[tuple[str, float]] = []
+        if abs(drift) <= 1e-15:
+            out.append(("q", q))
+        if abs(q) <= 1e-15:
+            out.append(("drift", drift))
+        return out
+    return []
 
 
-def format_sweep_leaders(parameters: list[dict]) -> list[str]:
-    leaders = collect_sweep_leaders(parameters)
-    if not leaders:
-        return []
-    best_delta = sweep_param_delta(leaders[0])
-    if best_delta <= 1e-12:
-        return [
-            "На этом батче ни один параметр не хуже нормы. "
-            "Ниже — куда править модель и контур."
-        ]
-    items = [format_leader_item(param) for param in leaders]
-    if len(items) == 1:
-        return [
-            f"Сильнее всего батч портит {items[0]}. "
-            "Ниже — куда править модель и контур."
-        ]
-    joined = "; ".join(items)
-    return [
-        f"Сильнее всего батч портят (ничья по приросту к норме): {joined}. "
-        "Ниже — куда править модель и контур."
-    ]
+def cite_level(
+    root: str,
+    scenario_id: str,
+    param_id: str,
+    level_id: str,
+    level: dict | None = None,
+    seed=None,
+) -> str:
+    if root.startswith("parameter_sweeps_by_scenario"):
+        path = f"{root}.parameters[{param_id}].levels[{level_id}]"
+    elif root == "parameter_sweeps":
+        path = f"parameter_sweeps.parameters[{param_id}].levels[{level_id}]"
+    else:
+        path = f"{root}.parameters[{param_id}].levels[{level_id}]"
+    bits = [f"`{path}`"]
+    if seed is not None:
+        bits.append(f"seed={seed}")
+    if level:
+        k, n = level_counts(level)
+        bits.append(f"{k}/{n} сбоев")
+        outcomes = level.get("outcomes") or []
+        if outcomes:
+            episodes = [_as_int(row.get("episode")) for row in outcomes]
+            bits.append(f"outcomes эпизодов {min(episodes)}–{max(episodes)}")
+    return ", ".join(bits)
 
 
-def scenario_heading(payload: dict) -> tuple[str, str]:
-    sid = str(payload.get("scenario") or "default")
-    label = str(payload.get("scenario_label") or sid)
-    return sid, label
-
-
-def scenario_blurb(payload: dict) -> str:
-    sid, label = scenario_heading(payload)
-    if sid == "slip_only":
-        return (
-            "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
-            f"сценарий `{sid}` — {label}. Стресс только трение пола, боковой удар выключен (Fy=0)."
-        )
-    if sid == "heavy_impact":
-        return (
-            "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
-            f"сценарий `{sid}` — {label}. Стресс — трение пола и усиленный боковой удар Fy до ±500 Н."
-        )
-    if sid == "nominal":
-        return (
-            "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
-            f"сценарий `{sid}` — {label}."
-        )
-    if sid == "moderate":
-        return (
-            "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
-            f"сценарий `{sid}` — {label}."
-        )
-    if sid == "extreme":
-        return (
-            "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
-            f"сценарий `{sid}` — {label}."
-        )
-    return (
-        "Автоматический разбор `reports/batch_failures.json`: PD держит стартовую стойку, "
-        "стресс — трение пола и боковая сила Fy до ±350 Н на корпус в окне удара."
-    )
-
-
-def format_one_sweep(sweeps: dict, heading: str | None = None) -> list[str]:
-    parameters = sweeps.get("parameters") or []
-    if not parameters:
-        return []
-
-    n_ep = _as_int(sweeps.get("n_episodes"), 0)
-    sid = sweeps.get("scenario") or "default"
-    slabel = sweeps.get("scenario_label") or sid
-    title = heading or "One-factor-at-a-time по параметрам"
-    lines = [
-        "",
-        f"## {title}",
-        "",
-        f"Батч {n_ep} эпизодов на каждый уровень, seed={sweeps.get('seed')}, "
-        f"сценарий `{sid}` — {slabel}. "
-        "Ниже — процент сбоев и прирост относительно нормы (базового уровня).",
-        "",
-    ]
-    for param in parameters:
-        name = param.get("name") or param.get("id")
-        baseline_id = param.get("baseline")
-        levels = list(param.get("levels") or [])
-        if not levels:
-            continue
-        baseline = next((lv for lv in levels if lv.get("id") == baseline_id), levels[0])
-        base_rate = sweep_level_rate(baseline)
-        worst = max(levels, key=sweep_level_rate)
-        lines.append(f"### {name} (`{param.get('id')}`)")
-        lines.append("")
-        for level in levels:
-            rate = sweep_level_rate(level)
-            delta = _as_float(level.get("delta_vs_baseline"), rate - base_rate)
-            mark = " — норма" if level.get("id") == baseline.get("id") else ""
-            lines.append(
-                f"- **{level.get('label', level.get('id'))}**: "
-                f"сбои {rate * 100:.1f}% "
-                f"({_as_int(level.get('n_failures'))}/{_as_int(level.get('n_episodes'))}), "
-                f"прирост к норме {delta * 100:+.1f} п.п.{mark}"
-            )
-        lines.append("")
-        lines.append(
-            f"Больше всего сбоев: **{worst.get('label', worst.get('id'))}** "
-            f"({sweep_level_rate(worst) * 100:.1f}%, "
-            f"{(sweep_level_rate(worst) - base_rate) * 100:+.1f} п.п. к норме)."
-        )
-        lines.append("")
-
-    lines += ["## Что и где менять", ""]
-    lines += format_sweep_leaders(parameters)
-    lines.append("")
-    for param in parameters:
-        pid = str(param.get("id") or "")
-        advice = SWEEP_FIXES.get(pid) or (
-            "Смотреть соответствующий параметр модели или контура управления."
-        )
-        worst_id = param.get("worst_level")
-        worst_label = param.get("worst_label")
-        delta = _as_float(param.get("worst_delta_vs_baseline"))
-        if delta <= 1e-12:
-            head = "на этом батче ни один уровень не хуже нормы."
-        else:
-            head = (
-                f"хуже всего уровень «{worst_label or worst_id}» "
-                f"({delta * 100:+.1f} п.п.)."
-            )
-        lines.append(f"- **{param.get('name')}**: {head}")
-        lines.append(f"  {advice}")
-        lines.append("")
-    return lines
-
-
-def format_sweep_sections(payload: dict) -> list[str]:
+def iter_sweep_blocks(payload: dict):
     by_scenario = payload.get("parameter_sweeps_by_scenario") or {}
     if by_scenario:
-        lines: list[str] = []
         order = ("nominal", "moderate", "extreme", "default")
         seen: set[str] = set()
         for sid in list(order) + list(by_scenario):
             if sid in seen or sid not in by_scenario:
                 continue
             seen.add(sid)
-            sweeps = by_scenario[sid]
-            label = sweeps.get("scenario_label") or sid
-            role = {
-                "nominal": "контроль",
-                "moderate": "чувствительность",
-            }.get(sid, sid)
-            lines += format_one_sweep(sweeps, f"OFAT: {sid} ({role}) — {label}")
-        return lines
+            yield sid, by_scenario[sid], f"parameter_sweeps_by_scenario.{sid}"
+        return
     sweeps = payload.get("parameter_sweeps") or {}
-    return format_one_sweep(sweeps)
+    if sweeps:
+        sid = str(sweeps.get("scenario") or "default")
+        yield sid, sweeps, "parameter_sweeps"
 
 
-def build_markdown(payload: dict, episodes: list[dict]) -> str:
+def interpolate_threshold(
+    param: dict,
+    threshold: float = FAIL_RATE_THRESHOLD,
+) -> list[dict]:
+    param_id = str(param.get("id") or "")
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for level in param.get("levels") or []:
+        rate = sweep_level_rate(level)
+        for axis, dose in axis_samples(level, param_id):
+            grouped[axis].append(
+                {
+                    "id": level.get("id"),
+                    "label": level.get("label") or level.get("id"),
+                    "dose": float(dose),
+                    "rate": rate,
+                    "n_failures": level_counts(level)[0],
+                    "n_episodes": level_counts(level)[1],
+                }
+            )
+    crossings: list[dict] = []
+    for axis, points in grouped.items():
+        points = sorted(points, key=lambda row: (row["dose"], row["rate"]))
+        for left, right in zip(points, points[1:]):
+            if left["id"] == right["id"]:
+                continue
+            r0, r1 = left["rate"], right["rate"]
+            d0, d1 = left["dose"], right["dose"]
+            if abs(d1 - d0) < 1e-15:
+                continue
+            lo_r, hi_r = (r0, r1) if r0 <= r1 else (r1, r0)
+            if not (lo_r < threshold <= hi_r):
+                continue
+            t = (threshold - r0) / (r1 - r0)
+            dose_star = d0 + t * (d1 - d0)
+            crossings.append(
+                {
+                    "axis": axis,
+                    "dose": dose_star,
+                    "threshold": threshold,
+                    "left_id": left["id"],
+                    "left_label": left["label"],
+                    "left_dose": d0,
+                    "left_rate": r0,
+                    "right_id": right["id"],
+                    "right_label": right["label"],
+                    "right_dose": d1,
+                    "right_rate": r1,
+                    "measured": False,
+                    "note": "гипотеза",
+                }
+            )
+    return crossings
+
+
+def mcnemar_exact_paired(base_outcomes: list[dict], treat_outcomes: list[dict]) -> dict:
+    """Точный Макнемар на парных исходах. Только для проверки Шага 4, статистику Шага 3 не меняет."""
+    from statsmodels.stats.contingency_tables import mcnemar
+
+    base_by = {int(o["episode"]): bool(o["failed"]) for o in base_outcomes}
+    treat_by = {int(o["episode"]): bool(o["failed"]) for o in treat_outcomes}
+    keys = sorted(set(base_by) & set(treat_by))
+    n00 = n01 = n10 = n11 = 0
+    for key in keys:
+        b = base_by[key]
+        t = treat_by[key]
+        if b and t:
+            n11 += 1
+        elif b and not t:
+            n01 += 1
+        elif (not b) and t:
+            n10 += 1
+        else:
+            n00 += 1
+    table = np.array([[n00, n01], [n10, n11]], dtype=int)
+    n_disc = n01 + n10
+    if n_disc == 0 or len(keys) == 0:
+        pvalue = 1.0
+    else:
+        pvalue = float(mcnemar(table, exact=True).pvalue)
+    return {
+        "test": "mcnemar_exact",
+        "n_paired": len(keys),
+        "n00": n00,
+        "n01": n01,
+        "n10": n10,
+        "n11": n11,
+        "n_discordant": n_disc,
+        "pvalue": pvalue,
+    }
+
+
+def safer_neighbor(param: dict, harmful: dict) -> tuple[dict | None, str]:
+    levels = list(param.get("levels") or [])
+    if not levels:
+        return None, "none"
+    baseline_id = param.get("baseline")
+    base = next((lv for lv in levels if lv.get("id") == baseline_id), levels[0])
+    param_id = str(param.get("id") or "")
+    harmful_axes = dict(axis_samples(harmful, param_id))
+    if not harmful_axes:
+        return base, "baseline"
+    axis, hdose = max(harmful_axes.items(), key=lambda kv: abs(kv[1]))
+    base_axes = dict(axis_samples(base, param_id))
+    if axis not in base_axes:
+        return base, "baseline"
+    bdose = base_axes[axis]
+    denom = hdose - bdose
+    if abs(denom) < 1e-15:
+        return base, "baseline"
+    candidates: list[tuple[float, dict]] = []
+    for level in levels:
+        if level.get("id") == harmful.get("id"):
+            continue
+        axes = dict(axis_samples(level, param_id))
+        if axis not in axes:
+            continue
+        t = (axes[axis] - bdose) / denom
+        if -1e-12 <= t < 1.0 - 1e-12:
+            candidates.append((t, level))
+    if not candidates:
+        return base, "baseline"
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1], "neighbor"
+
+
+def collect_significant_findings(payload: dict, threshold: float = FAIL_RATE_THRESHOLD) -> list[dict]:
+    findings: list[dict] = []
+    for sid, sweeps, root in iter_sweep_blocks(payload):
+        seed = sweeps.get("seed")
+        n_tests = (sweeps.get("multiple_testing") or {}).get("n_tests")
+        for param in sweeps.get("parameters") or []:
+            param_id = str(param.get("id") or "")
+            param_name = param.get("name") or param_id
+            baseline_id = param.get("baseline")
+            levels = list(param.get("levels") or [])
+            if not levels:
+                continue
+            base = next((lv for lv in levels if lv.get("id") == baseline_id), levels[0])
+            base_rate = sweep_level_rate(base)
+            crossings = interpolate_threshold(param, threshold)
+            for level in levels:
+                kind = effect_kind(level, baseline_id, base_rate)
+                if kind not in {"harmful", "improving"}:
+                    continue
+                k, n = level_counts(level)
+                ci = level_ci(level)
+                level_axes = {axis for axis, _ in axis_samples(level, param_id)}
+                level_crossings = [row for row in crossings if row["axis"] in level_axes]
+                findings.append(
+                    {
+                        "scenario_id": sid,
+                        "scenario_label": sweeps.get("scenario_label") or sid,
+                        "root": root,
+                        "seed": seed,
+                        "holm_n_tests": n_tests,
+                        "param_id": param_id,
+                        "param_name": param_name,
+                        "baseline_id": baseline_id,
+                        "baseline_label": base.get("label") or baseline_id,
+                        "baseline_rate": base_rate,
+                        "baseline_ci": list(level_ci(base)),
+                        "level_id": level.get("id"),
+                        "level_label": level.get("label") or level.get("id"),
+                        "kind": kind,
+                        "direction": effect_direction_ru(kind),
+                        "rate": sweep_level_rate(level),
+                        "n_failures": k,
+                        "n_episodes": n,
+                        "ci95": list(ci),
+                        "delta": delta_vs_baseline(level, base_rate),
+                        "p_mcnemar": level.get("p_mcnemar"),
+                        "p_holm": level.get("p_holm"),
+                        "cite": cite_level(root, sid, param_id, str(level.get("id")), level, seed),
+                        "baseline_cite": cite_level(
+                            root, sid, param_id, str(base.get("id")), base, seed
+                        ),
+                        "crossings": level_crossings,
+                        "factor": level.get("factor"),
+                    }
+                )
+    return findings
+
+
+def finding_sort_key(item: dict) -> tuple:
+    return (
+        -abs(_as_float(item.get("delta"))),
+        -_as_float(item.get("rate")),
+        _as_float(item.get("p_holm"), 1.0),
+        0 if item.get("scenario_id") == "nominal" else 1,
+        str(item.get("param_id") or ""),
+        str(item.get("level_id") or ""),
+    )
+
+
+def select_top_weaknesses(findings: list[dict], k: int = VERIFY_TOP_K) -> list[dict]:
+    harmful = [item for item in findings if item.get("kind") == "harmful"]
+    harmful.sort(key=finding_sort_key)
+    picked: list[dict] = []
+    seen_params: set[str] = set()
+    for item in harmful:
+        pid = str(item.get("param_id") or "")
+        if pid in seen_params:
+            continue
+        picked.append(item)
+        seen_params.add(pid)
+        if len(picked) >= k:
+            return picked
+    for item in harmful:
+        if item in picked:
+            continue
+        picked.append(item)
+        if len(picked) >= k:
+            break
+    return picked
+
+
+def lookup_param_level(payload: dict, finding: dict) -> tuple[dict | None, dict | None]:
+    for sid, sweeps, root in iter_sweep_blocks(payload):
+        if sid != finding.get("scenario_id") or root != finding.get("root"):
+            continue
+        for param in sweeps.get("parameters") or []:
+            if param.get("id") != finding.get("param_id"):
+                continue
+            level = next(
+                (lv for lv in (param.get("levels") or []) if lv.get("id") == finding.get("level_id")),
+                None,
+            )
+            return param, level
+    return None, None
+
+
+def verify_status(
+    before: dict,
+    after: dict,
+    finding: dict,
+    mcnemar: dict | None,
+) -> str:
+    before_rate = sweep_level_rate(before)
+    after_rate = sweep_level_rate(after)
+    if after_rate >= before_rate - 1e-12:
+        return "не подтверждено"
+    after_is_baseline = after.get("id") == finding.get("baseline_id")
+    if after_is_baseline and finding.get("kind") == "harmful" and finding.get("p_holm") is not None:
+        if _as_float(finding.get("p_holm"), 1.0) <= 0.05:
+            return "подтверждено"
+    before_ci = level_ci(before)
+    after_ci = level_ci(after)
+    if after_ci[1] < before_ci[0]:
+        return "подтверждено"
+    p_mc = None if mcnemar is None else mcnemar.get("pvalue")
+    if p_mc is not None and float(p_mc) < 0.05:
+        return "подтверждено"
+    return "гипотеза"
+
+
+def verify_top_weaknesses(payload: dict, findings: list[dict], k: int = VERIFY_TOP_K) -> list[dict]:
+    rows: list[dict] = []
+    for finding in select_top_weaknesses(findings, k):
+        param, before = lookup_param_level(payload, finding)
+        if param is None or before is None:
+            rows.append(
+                {
+                    "finding": finding,
+                    "status": "гипотеза",
+                    "reason": "в JSON нет строк уровня для проверки",
+                }
+            )
+            continue
+        after, how = safer_neighbor(param, before)
+        if after is None:
+            rows.append(
+                {
+                    "finding": finding,
+                    "before": before,
+                    "status": "гипотеза",
+                    "reason": "нет измеренного уровня в безопасную сторону",
+                }
+            )
+            continue
+        mc = None
+        before_out = before.get("outcomes") or []
+        after_out = after.get("outcomes") or []
+        if before_out and after_out:
+            mc = mcnemar_exact_paired(after_out, before_out)
+        status = verify_status(before, after, finding, mc)
+        after_k, after_n = level_counts(after)
+        before_k, before_n = level_counts(before)
+        rows.append(
+            {
+                "finding": finding,
+                "before_id": before.get("id"),
+                "before_label": before.get("label") or before.get("id"),
+                "before_rate": sweep_level_rate(before),
+                "before_ci": list(level_ci(before)),
+                "before_n_failures": before_k,
+                "before_n_episodes": before_n,
+                "before_cite": finding["cite"],
+                "after_id": after.get("id"),
+                "after_label": after.get("label") or after.get("id"),
+                "after_rate": sweep_level_rate(after),
+                "after_ci": list(level_ci(after)),
+                "after_n_failures": after_k,
+                "after_n_episodes": after_n,
+                "after_cite": cite_level(
+                    finding["root"],
+                    finding["scenario_id"],
+                    finding["param_id"],
+                    str(after.get("id")),
+                    after,
+                    finding.get("seed"),
+                ),
+                "move": how,
+                "mcnemar": mc,
+                "status": status,
+            }
+        )
+    return rows
+
+
+def format_crossings(crossings: list[dict], threshold: float) -> str:
+    if not crossings:
+        return (
+            f"точка, где доля сбоев превышает {format_pct(threshold)}, "
+            "по измеренным уровням с общей осью не интерполируется (гипотеза)"
+        )
+    parts = []
+    for cr in crossings:
+        parts.append(
+            f"порог {format_pct(threshold)} на оси `{cr['axis']}`≈{cr['dose']:.4g} "
+            f"между «{cr['left_label']}» ({format_pct(cr['left_rate'])}) и "
+            f"«{cr['right_label']}» ({format_pct(cr['right_rate'])}) — гипотеза, "
+            "промежуточный уровень не измерялся"
+        )
+    return "; ".join(parts)
+
+
+def scenario_heading(payload: dict) -> tuple[str | None, str | None]:
+    raw = payload.get("scenario")
+    if raw is None or str(raw).strip() == "":
+        return None, None
+    label = payload.get("scenario_label")
+    return str(raw), None if label is None else str(label)
+
+
+def failure_criterion_label(payload: dict) -> str | None:
+    def from_value(value: object) -> str | None:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            fail = value.get("fail")
+            if isinstance(fail, str) and fail.strip():
+                return fail.strip()
+        return None
+
+    found = from_value(payload.get("failure_criterion"))
+    if found:
+        return found
+    for _sid, sweeps, _root in iter_sweep_blocks(payload):
+        found = from_value(sweeps.get("failure_criterion"))
+        if found:
+            return found
+    return None
+
+
+def scenario_blurb(payload: dict) -> str:
+    criterion = failure_criterion_label(payload)
+    criterion_txt = (
+        f"`{criterion}`"
+        if criterion
+        else "поле `failure_criterion` отсутствует"
+    )
+    blocks = list(iter_sweep_blocks(payload))
+    if blocks:
+        names = ", ".join(f"`{sid}`" for sid, _sweeps, _root in blocks)
+        return (
+            "Автоматический разбор `reports/batch_failures.json`. "
+            f"Критерий сбоя: {criterion_txt}. "
+            f"Сценарии OFAT в файле: {names}."
+        )
+    sid, label = scenario_heading(payload)
+    if sid is None:
+        scenario_txt = "поле `scenario` в корне отсутствует"
+    else:
+        scenario_txt = f"сценарий `{sid}`" + (f" — {label}" if label else "")
+    return (
+        "Автоматический разбор `reports/batch_failures.json`. "
+        f"Критерий сбоя: {criterion_txt}. {scenario_txt}."
+    )
+
+
+def baseline_fail_reason_lines(payload: dict) -> list[str]:
+    """Один базовый уровень на сценарий: эпизоды факторов не складываются."""
+    lines: list[str] = []
+    for sid, sweeps, root in iter_sweep_blocks(payload):
+        params = list(sweeps.get("parameters") or [])
+        if not params:
+            continue
+        param = params[0]
+        baseline_id = param.get("baseline")
+        levels = list(param.get("levels") or [])
+        level = next((lv for lv in levels if lv.get("id") == baseline_id), None)
+        if level is None:
+            continue
+        reasons = level.get("fail_reasons")
+        if isinstance(reasons, dict) and reasons:
+            reason_txt = ", ".join(
+                f"{key}={_as_int(reasons[key])}" for key in sorted(reasons)
+            )
+        elif isinstance(reasons, dict):
+            reason_txt = "fail_reasons пуст"
+        else:
+            reason_txt = "поле fail_reasons отсутствует"
+        k, n = level_counts(level)
+        param_id = param.get("id")
+        level_id = level.get("id")
+        lines.append(
+            f"- `{sid}`: {reason_txt}, сбоев {k}/{n} "
+            f"(базовый уровень `{param_id}`/`{level_id}`, "
+            f"`{root}.parameters[{param_id}].levels[{level_id}].fail_reasons`)."
+        )
+    return lines
+
+
+def header_stat_lines(payload: dict) -> list[str]:
+    """Шапка только из полей JSON. Корень не подменяет сценарии OFAT."""
+    lines: list[str] = []
+    blocks = list(iter_sweep_blocks(payload))
+    sweep_ids = {sid for sid, _sweeps, _root in blocks}
+    if blocks:
+        lines.append("- сценарии OFAT:")
+        for sid, sweeps, _root in blocks:
+            label = sweeps.get("scenario_label")
+            label_txt = f" — {label}" if label else ""
+            n_ep = sweeps.get("n_episodes")
+            n_txt = (
+                str(int(n_ep))
+                if isinstance(n_ep, (int, float))
+                else "поле `n_episodes` отсутствует"
+            )
+            lines.append(f"  - `{sid}`{label_txt}: эпизодов на уровень {n_txt}")
+    root_scenario, root_label = scenario_heading(payload)
+    if not blocks:
+        if root_scenario is None:
+            lines.append("- сценарий: поле `scenario` отсутствует")
+        else:
+            label_txt = f" — {root_label}" if root_label else ""
+            lines.append(f"- сценарий: `{root_scenario}`{label_txt}")
+        n_all = payload.get("n_episodes")
+        if n_all is None:
+            lines.append("- всего прогонов: поле `n_episodes` отсутствует")
+        else:
+            lines.append(f"- всего прогонов: {n_all}")
+    elif root_scenario is not None and root_scenario not in sweep_ids:
+        lines.append(
+            "- в корне JSON есть отдельная запись сценария, она не входит в блоки OFAT "
+            "и в эту шапку как основной сценарий не подставляется"
+        )
+    kp = payload.get("kp")
+    kd = payload.get("kd")
+    if (kp is None or kd is None) and blocks:
+        kp = blocks[0][1].get("kp", kp)
+        kd = blocks[0][1].get("kd", kd)
+    if kp is not None or kd is not None:
+        lines.append(f"- PD: kp={kp}, kd={kd}")
+    if payload.get("impulse_start") is not None and payload.get("impulse_end") is not None:
+        lines.append(
+            f"- окно удара: шаги {payload['impulse_start']}..{payload['impulse_end']}"
+        )
+    n_fail_list = len(payload.get("failures") or [])
+    lines.append(f"- эпизодов в списке `failures`: {n_fail_list}")
+    if payload.get("n_sag") is not None:
+        sag = payload.get("n_sag")
+        sag_rate = payload.get("sag_rate")
+        rate_txt = (
+            f" ({float(sag_rate) * 100:.1f}%)"
+            if isinstance(sag_rate, (int, float))
+            else ""
+        )
+        lines.append(f"- просадка z<0.20: {sag}{rate_txt}")
+    return lines
+
+
+def stored_fail_reason_lines(episodes: list[dict]) -> list[str]:
+    if not episodes:
+        return ["- список `failures` пуст, разбивки fall/stance_loss по нему нет."]
+    counts: Counter[str] = Counter()
+    missing = 0
+    for ep in episodes:
+        reason = ep.get("fail_reason")
+        if reason is None or str(reason).strip() == "":
+            missing += 1
+        else:
+            counts[str(reason)] += 1
+    lines: list[str] = []
+    for name in ("fall", "stance_loss"):
+        if name in counts:
+            lines.append(f"- `{name}`: {counts[name]}")
+    for name in sorted(counts):
+        if name not in {"fall", "stance_loss"}:
+            lines.append(f"- `{name}`: {counts[name]} (как записано в `fail_reason`)")
+    if missing:
+        lines.append(
+            f"- без поля `fail_reason`: {missing}. "
+            "Причина по окну телеметрии не назначается."
+        )
+    if not lines:
+        lines.append("- в эпизодах нет распознанного `fail_reason`.")
+    return lines
+
+
+def format_level_line(
+    level: dict,
+    baseline_id: str | None,
+    base_rate: float,
+    cite: str,
+) -> str:
+    kind = effect_kind(level, baseline_id, base_rate)
+    k, n = level_counts(level)
+    rate = sweep_level_rate(level)
+    delta = delta_vs_baseline(level, base_rate)
+    ci = level_ci(level)
+    mark = " — норма" if kind == "baseline" else ""
+    extra = ""
+    if kind != "baseline":
+        extra = (
+            f", Δ {delta * 100:+.1f} п.п. ({effect_direction_ru(kind)}), "
+            f"p_holm={format_p(level.get('p_holm'))}"
+        )
+        if kind == "harmful":
+            extra += " — значимо, вредный эффект"
+        elif kind == "improving":
+            extra += " — значимо, улучшающий эффект"
+        else:
+            extra += " — в пределах шума"
+    return (
+        f"- **{level.get('label', level.get('id'))}** (`{level.get('id')}`): "
+        f"доля {format_pct(rate)} ({k}/{n}), Уилсон 95% CI {format_ci(ci)}"
+        f"{extra}{mark}. Источник: {cite}"
+    )
+
+
+def format_one_sweep(
+    sweeps: dict,
+    heading: str | None = None,
+    root: str | None = None,
+    threshold: float = FAIL_RATE_THRESHOLD,
+) -> list[str]:
+    parameters = sweeps.get("parameters") or []
+    if not parameters:
+        return []
+
+    n_ep = _as_int(sweeps.get("n_episodes"), 0)
+    sid = str(sweeps.get("scenario") or "default")
+    slabel = sweeps.get("scenario_label") or sid
+    seed = sweeps.get("seed")
+    root = root or "parameter_sweeps"
+    n_tests = (sweeps.get("multiple_testing") or {}).get("n_tests")
+    title = heading or "One-factor-at-a-time по параметрам"
+    holm_note = (
+        f"Выводы ниже по значимости — только после поправки Холма "
+        f"(n_tests={n_tests}). "
+        if n_tests is not None
+        else "Выводы ниже по значимости — только после поправки Холма. "
+    )
+    lines = [
+        "",
+        f"## {title}",
+        "",
+        f"Батч {n_ep} эпизодов на каждый уровень, seed={seed}, "
+        f"сценарий `{sid}` — {slabel}. "
+        "Доля сбоев, 95% CI Уилсона и p_holm vs норма того же фактора. "
+        + holm_note
+        + "Направление: усиление сбоев (доля выше нормы) или ослабление сбоев (доля ниже нормы).",
+        "",
+    ]
+    any_harmful = False
+    for param in parameters:
+        param_id = str(param.get("id") or "")
+        name = param.get("name") or param_id
+        baseline_id = param.get("baseline")
+        levels = list(param.get("levels") or [])
+        if not levels:
+            continue
+        baseline = next((lv for lv in levels if lv.get("id") == baseline_id), levels[0])
+        base_rate = sweep_level_rate(baseline)
+        lines.append(f"### {name} (`{param_id}`)")
+        lines.append("")
+        harmful = []
+        improving = []
+        for level in levels:
+            cite = cite_level(root, sid, param_id, str(level.get("id")), level, seed)
+            lines.append(format_level_line(level, baseline_id, base_rate, cite))
+            kind = effect_kind(level, baseline_id, base_rate)
+            if kind == "harmful":
+                harmful.append(level)
+            elif kind == "improving":
+                improving.append(level)
+        lines.append("")
+        if harmful:
+            any_harmful = True
+            crossings = interpolate_threshold(param, threshold)
+            lines.append("Значимые вредные эффекты (Холм):")
+            for level in harmful:
+                k, n = level_counts(level)
+                ci = level_ci(level)
+                lines.append(
+                    f"- **{level.get('label', level.get('id'))}**: "
+                    f"{effect_direction_ru('harmful')}, доля {format_pct(sweep_level_rate(level))} "
+                    f"({k}/{n}), Уилсон 95% CI {format_ci(ci)}, "
+                    f"p_holm={format_p(level.get('p_holm'))}, "
+                    f"Δ {delta_vs_baseline(level, base_rate) * 100:+.1f} п.п. "
+                    f"Источник: {cite_level(root, sid, param_id, str(level.get('id')), level, seed)}."
+                )
+            lines.append(f"- {format_crossings(crossings, threshold).capitalize()}.")
+            lines.append("")
+        else:
+            lines.append("значимого вредного эффекта не найдено.")
+            lines.append("")
+        if improving:
+            lines.append("Значимые улучшающие эффекты:")
+            for level in improving:
+                k, n = level_counts(level)
+                ci = level_ci(level)
+                lines.append(
+                    f"- **{level.get('label', level.get('id'))}**: "
+                    f"улучшающий эффект, доля {format_pct(sweep_level_rate(level))} "
+                    f"({k}/{n}), Уилсон 95% CI {format_ci(ci)}, "
+                    f"p_holm={format_p(level.get('p_holm'))}, "
+                    f"Δ {delta_vs_baseline(level, base_rate) * 100:+.1f} п.п. "
+                    f"Источник: {cite_level(root, sid, param_id, str(level.get('id')), level, seed)}."
+                )
+            lines.append("")
+    if not any_harmful:
+        lines += [
+            "По этому сценарию значимого вредного эффекта не найдено.",
+            "",
+        ]
+    return lines
+
+
+def format_sweep_sections(payload: dict, threshold: float = FAIL_RATE_THRESHOLD) -> list[str]:
+    blocks = list(iter_sweep_blocks(payload))
+    if not blocks:
+        return []
+    lines: list[str] = []
+    for sid, sweeps, root in blocks:
+        label = sweeps.get("scenario_label") or sid
+        role = {
+            "nominal": "контроль",
+            "moderate": "чувствительность",
+        }.get(sid, sid)
+        heading = f"OFAT: {sid} ({role}) — {label}" if sid in {"nominal", "moderate"} else f"OFAT: {sid} — {label}"
+        lines += format_one_sweep(sweeps, heading, root=root, threshold=threshold)
+    return lines
+
+
+def slim_finding(item: dict) -> dict:
+    return {
+        "scenario_id": item.get("scenario_id"),
+        "param_id": item.get("param_id"),
+        "param_name": item.get("param_name"),
+        "level_id": item.get("level_id"),
+        "level_label": item.get("level_label"),
+        "kind": item.get("kind"),
+        "direction": item.get("direction"),
+        "rate": item.get("rate"),
+        "n_failures": item.get("n_failures"),
+        "n_episodes": item.get("n_episodes"),
+        "ci95": item.get("ci95"),
+        "delta": item.get("delta"),
+        "p_holm": item.get("p_holm"),
+        "p_mcnemar": item.get("p_mcnemar"),
+        "cite": item.get("cite"),
+        "crossings": item.get("crossings"),
+        "factor": item.get("factor"),
+    }
+
+
+def build_diagnosis_payload(
+    payload: dict,
+    threshold: float = FAIL_RATE_THRESHOLD,
+    top_k: int = VERIFY_TOP_K,
+) -> dict:
+    findings = collect_significant_findings(payload, threshold)
+    verifications = verify_top_weaknesses(payload, findings, top_k)
+    harmful = [item for item in findings if item.get("kind") == "harmful"]
+    improving = [item for item in findings if item.get("kind") == "improving"]
+    recs: list[dict] = []
+    if not harmful:
+        recs.append(
+            {
+                "text": (
+                    "значимого вредного эффекта не найдено: ни один ненулевой уровень OFAT "
+                    "не имеет значимого усиления сбоев после поправки Холма."
+                ),
+                "cite": "parameter_sweeps_by_scenario.*.parameters[*].levels[*] (significant=false или Δ≤0)",
+                "kind": "none",
+            }
+        )
+    for item in harmful:
+        recs.append(
+            {
+                "text": (
+                    f"Фактор `{item['param_id']}` ({item['param_name']}), уровень "
+                    f"«{item['level_label']}» (`{item['level_id']}`), сценарий `{item['scenario_id']}`: "
+                    f"{item['direction']}, доля {format_pct(item['rate'])} "
+                    f"({item['n_failures']}/{item['n_episodes']}), "
+                    f"Уилсон 95% CI {format_ci(tuple(item['ci95']))}, "
+                    f"p_holm={format_p(item['p_holm'])}, "
+                    f"Δ {item['delta'] * 100:+.1f} п.п. к норме "
+                    f"«{item['baseline_label']}» ({format_pct(item['baseline_rate'])}). "
+                    f"{format_crossings(item.get('crossings') or [], threshold).capitalize()}."
+                ),
+                "cite": item["cite"],
+                "kind": "harmful",
+                "param_id": item["param_id"],
+                "level_id": item["level_id"],
+                "scenario_id": item["scenario_id"],
+            }
+        )
+    for item in improving:
+        recs.append(
+            {
+                "text": (
+                    f"Фактор `{item['param_id']}` ({item['param_name']}), уровень "
+                    f"«{item['level_label']}» (`{item['level_id']}`), сценарий `{item['scenario_id']}`: "
+                    f"улучшающий эффект, доля {format_pct(item['rate'])} "
+                    f"({item['n_failures']}/{item['n_episodes']}), "
+                    f"Уилсон 95% CI {format_ci(tuple(item['ci95']))}, "
+                    f"p_holm={format_p(item['p_holm'])}, "
+                    f"Δ {item['delta'] * 100:+.1f} п.п. к норме."
+                ),
+                "cite": item["cite"],
+                "kind": "improving",
+                "param_id": item["param_id"],
+                "level_id": item["level_id"],
+                "scenario_id": item["scenario_id"],
+            }
+        )
+    slim_verifications = []
+    for row in verifications:
+        if "before_id" not in row:
+            slim_verifications.append(
+                {
+                    "status": row.get("status"),
+                    "reason": row.get("reason"),
+                    "finding": slim_finding(row["finding"]),
+                }
+            )
+            continue
+        slim_verifications.append(
+            {
+                "param_id": row["finding"]["param_id"],
+                "scenario_id": row["finding"]["scenario_id"],
+                "before_id": row["before_id"],
+                "before_label": row["before_label"],
+                "before_rate": row["before_rate"],
+                "before_ci": row["before_ci"],
+                "before_n_failures": row["before_n_failures"],
+                "before_n_episodes": row["before_n_episodes"],
+                "before_cite": row["before_cite"],
+                "after_id": row["after_id"],
+                "after_label": row["after_label"],
+                "after_rate": row["after_rate"],
+                "after_ci": row["after_ci"],
+                "after_n_failures": row["after_n_failures"],
+                "after_n_episodes": row["after_n_episodes"],
+                "after_cite": row["after_cite"],
+                "move": row["move"],
+                "mcnemar_pvalue": None if not row.get("mcnemar") else row["mcnemar"].get("pvalue"),
+                "status": row["status"],
+            }
+        )
+    return {
+        "threshold": threshold,
+        "n_significant_harmful": len(harmful),
+        "n_significant_improving": len(improving),
+        "findings": [slim_finding(item) for item in findings],
+        "recommendations": recs,
+        "verifications": slim_verifications,
+        "verifications_raw": verifications,
+    }
+
+
+def format_recommendation_sections(diag: dict, threshold: float = FAIL_RATE_THRESHOLD) -> list[str]:
+    lines = [
+        "",
+        "## Рекомендации (только значимые эффекты после Холма)",
+        "",
+        "Шаблоны про железо и произвольные числа из кода не используются. "
+        "Каждый пункт ссылается на уровень OFAT в `reports/batch_failures.json`.",
+        "",
+    ]
+    recs = diag.get("recommendations") or []
+    if not recs:
+        lines.append("значимого вредного эффекта не найдено.")
+        lines.append("")
+    else:
+        for rec in recs:
+            lines.append(f"- {rec['text']}")
+            lines.append(f"  Источник: {rec['cite']}.")
+            lines.append("")
+    lines += [
+        "## Проверка топ-3 значимых слабостей (сдвиг в безопасную сторону)",
+        "",
+        "Для каждой слабости берётся значимый вредный уровень и соседний уже измеренный "
+        "уровень OFAT ближе к норме (те же seed). До и после — доля сбоев и 95% CI Уилсона.",
+        "",
+    ]
+    verifications = diag.get("verifications_raw") or []
+    if not verifications:
+        lines.append("значимого вредного эффекта не найдено — проверять нечего.")
+        lines.append("")
+        return lines
+    for i, row in enumerate(verifications, start=1):
+        finding = row["finding"]
+        if "before_id" not in row:
+            lines.append(
+                f"{i}. `{finding.get('param_id')}` / `{finding.get('level_id')}`: "
+                f"{row.get('status')} ({row.get('reason')}). "
+                f"Источник: {finding.get('cite')}."
+            )
+            lines.append("")
+            continue
+        p_mc = None if not row.get("mcnemar") else row["mcnemar"].get("pvalue")
+        lines.append(
+            f"{i}. **{finding['param_name']}** (`{finding['param_id']}`), сценарий "
+            f"`{finding['scenario_id']}`: «{row['before_label']}» → «{row['after_label']}» "
+            f"({row['move']})."
+        )
+        lines.append(
+            f"   - до: доля {format_pct(row['before_rate'])} "
+            f"({row['before_n_failures']}/{row['before_n_episodes']}), "
+            f"Уилсон 95% CI {format_ci(tuple(row['before_ci']))}. "
+            f"Источник: {row['before_cite']}."
+        )
+        lines.append(
+            f"   - после: доля {format_pct(row['after_rate'])} "
+            f"({row['after_n_failures']}/{row['after_n_episodes']}), "
+            f"Уилсон 95% CI {format_ci(tuple(row['after_ci']))}. "
+            f"Источник: {row['after_cite']}."
+        )
+        lines.append(
+            f"   - статус: **{row['status']}**"
+            + (f" (точный Макнемар до/после p={format_p(p_mc)})" if p_mc is not None else "")
+            + "."
+        )
+        lines.append(
+            f"   - порог {format_pct(threshold)}: "
+            f"{format_crossings(finding.get('crossings') or [], threshold)}."
+        )
+        lines.append("")
+    return lines
+
+def build_markdown(payload: dict, episodes: list[dict], diag: dict | None = None) -> str:
     n_fail = len(episodes)
-    n_all = payload.get("n_episodes")
-    n_survived = payload.get("n_survived")
-    rate = payload.get("failure_rate")
-    stats = category_stats(episodes)
     phases = phase_stats(episodes)
     impact = impact_window_stats(payload, episodes)
     examples = pick_examples(episodes)
-    recs = controller_recommendations(stats)
+    if diag is None:
+        diag = build_diagnosis_payload(payload)
 
-    sid, slabel = scenario_heading(payload)
-    scenario_note = ""
-    if sid == "slip_only":
-        scenario_note = " Боковой удар выключен: сбои идут от стойки и скольжения, не от Fy."
-    elif sid == "heavy_impact":
-        scenario_note = " Удар сильнее обычного: диапазон Fy до ±500 Н."
+    criterion = failure_criterion_label(payload)
+    criterion_txt = f"`{criterion}`" if criterion else "поле `failure_criterion` отсутствует"
 
     lines = [
         "# Диагностика сбоев Go2",
@@ -646,44 +1402,28 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
         "",
         "## Общая статистика",
         "",
-        f"- всего прогонов: {n_all}",
-        f"- сбоев (новый критерий): {n_fail}"
-        + (f" ({rate * 100:.1f}%)" if isinstance(rate, (int, float)) else ""),
-        f"- устояли: {n_survived}",
-        f"- просадка z<0.20: {payload.get('n_sag')} "
-        + (
-            f"({float(payload.get('sag_rate')) * 100:.1f}%)"
-            if isinstance(payload.get("sag_rate"), (int, float))
-            else ""
-        ),
-        f"- сценарий: `{sid}` — {slabel}.{scenario_note}",
-        f"- PD: kp={payload.get('kp')}, kd={payload.get('kd')}",
-        f"- окно удара: шаги {_as_int(payload.get('impulse_start'), DEFAULT_IMPULSE_START)}.."
-        f"{_as_int(payload.get('impulse_end'), DEFAULT_IMPULSE_END)}",
+        *header_stat_lines(payload),
         "",
         "## Категории сбоев",
         "",
-        f"Правила: опрокидывание при макс. |qvel[3]| > {ROLL_RATE_THRESHOLD} рад/с; "
-        f"разъезжание при трении < {SLIP_FRICTION_THRESHOLD} и |qvel[3]| ≤ {ROLL_RATE_THRESHOLD}; иначе смешанный случай.",
+        f"Критерий сбоя: {criterion_txt}. В данных это `fall` и `stance_loss` из `fail_reason`.",
         "",
     ]
-    if n_fail == 0:
-        lines.append("Сбойных эпизодов нет.")
-        lines += format_sweep_sections(payload)
-        lines += ["## Рекомендации для контроллера", ""]
-        for rec in recs:
-            lines.append(f"- {rec}")
+    reason_lines = baseline_fail_reason_lines(payload)
+    if reason_lines:
+        lines.append(
+            "Базовый уровень OFAT (берётся один фактор на сценарий, "
+            "эпизоды разных параметров не суммируются):"
+        )
+        lines.extend(reason_lines)
         lines.append("")
+    lines.extend(stored_fail_reason_lines(episodes))
+    lines.append("")
+    if n_fail == 0:
+        lines += format_sweep_sections(payload)
+        lines += format_recommendation_sections(diag)
         return "\n".join(lines)
 
-    for name, n, n_before, pct in stats:
-        before_note = (
-            f", из них до удара (`before_impact`): {n_before}"
-            " — самопроизвольное падение на старте/стойке, не следствие Fy"
-            if n_before
-            else ", из них до удара: 0"
-        )
-        lines.append(f"- **{name}**: {n} шт. ({pct:.1f}% от сбоев){before_note}")
     lines += [
         "",
         "## Сбои при/после удара (шаг ≥ 450)",
@@ -708,31 +1448,15 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
             extra = " — падение ещё до включения силы Fy"
         lines.append(f"- **{label}** (`{phase}`): {n} шт. ({pct:.1f}% от сбоев){extra}")
 
-    mixed = [ep for ep in episodes if ep["category"] == CAT_OTHER]
-    if mixed:
-        lines += [
-            "",
-            "## Пояснения к смешанным сбоям",
-            "",
-            "Правила классификации не менялись: это эпизоды вне порогов опрокидывания и разъезжания. "
-            "Ниже — краткий комментарий, что в каждом случае выглядит преобладающим.",
-            "",
-        ]
-        for ep in sorted(mixed, key=lambda item: _as_int(item.get("episode"))):
-            lines.append(
-                f"- эпизод {ep.get('episode')}: {format_push(ep)}, "
-                f"μ={ep['friction']:.3f}, |qvel[3]|={ep['max_abs_roll_rate']:.2f} рад/с, "
-                f"{ep.get('fail_vs_impulse', '')}. {mixed_comment(ep)}"
-            )
-
     lines += ["", "## Показательные примеры", ""]
 
     if not examples:
         lines.append("Примеров нет.")
     else:
         for i, ep in enumerate(examples, start=1):
+            reason = ep.get("fail_reason") or "поле fail_reason отсутствует"
             lines += [
-                f"### Пример {i}. Эпизод {ep['episode']} — {ep['category']}",
+                f"### Пример {i}. Эпизод {ep['episode']} — {reason}",
                 "",
                 f"- трение: {ep['friction']:.3f}",
                 f"- боковая сила: {format_push(ep)}",
@@ -742,16 +1466,10 @@ def build_markdown(payload: dict, episodes: list[dict]) -> str:
                 f"- макс. скорость корпуса: {ep['max_body_speed']:.3f} м/с",
                 f"- высота в окне: {ep['z_first']:.3f} → {ep['z_last']:.3f}",
                 "",
-                explain_example(ep),
-                "",
             ]
 
     lines += format_sweep_sections(payload)
-
-    lines += ["## Рекомендации для контроллера", ""]
-    for rec in recs:
-        lines.append(f"- {rec}")
-    lines.append("")
+    lines += format_recommendation_sections(diag)
     return "\n".join(lines)
 
 
@@ -781,10 +1499,16 @@ def main() -> None:
 
     payload = json.loads(FAILURES_PATH.read_text(encoding="utf-8"))
     episodes = classify_episodes(payload)
-    report = build_markdown(payload, episodes)
+    diag = build_diagnosis_payload(payload)
+    report = build_markdown(payload, episodes, diag)
 
     print(report.rstrip())
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    recs_out = {key: value for key, value in diag.items() if key != "verifications_raw"}
+    RECS_JSON_PATH.write_text(
+        json.dumps(recs_out, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
     api_key = get_api_key()
     if api_key:
@@ -798,6 +1522,7 @@ def main() -> None:
 
     REPORT_PATH.write_text(report, encoding="utf-8")
     print(f"\nотчёт сохранён: {REPORT_PATH}")
+    print(f"рекомендации JSON: {RECS_JSON_PATH}")
 
 
 if __name__ == "__main__":
