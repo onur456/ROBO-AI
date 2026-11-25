@@ -34,20 +34,20 @@ def main() -> None:
         )
 
         if z < FALL_HEIGHT:
-            print(f"сбой на шаге {step}, time={data.time:.6f}")
+            print(f"failure at step {step}, time={data.time:.6f}")
             print(f"z={z:.6f}")
-            print(f"записей в окне до сбоя: {len(window)}")
+            print(f"records in the window before the failure: {len(window)}")
             REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
             REPORT_PATH.write_text(
                 json.dumps(list(window), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
-            print(f"буфер сохранён: {REPORT_PATH}")
+            print(f"buffer saved: {REPORT_PATH}")
             failed = True
             break
 
     if not failed:
-        print("за 2000 шагов сбой не зафиксирован")
+        print("no failure recorded in 2000 steps")
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Запуск дашборда: python run_dashboard.py [--report PATH]."""
+"""Launch the dashboard: python run_dashboard.py [--report PATH]."""
 
 from __future__ import annotations
 

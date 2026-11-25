@@ -93,19 +93,19 @@ class Step4DiagnoseTest(unittest.TestCase):
             [
                 _param(
                     "com_x",
-                    "смещение COM по X",
+                    "COM offset along X",
                     "zero",
                     [
                         _level(
                             "zero",
-                            "базовый 0 м",
+                            "baseline 0 m",
                             0.0,
                             baseline=True,
                             factor={"kind": "com_offset", "offset": [0.0, 0.0, 0.0]},
                         ),
                         _level(
                             "pos",
-                            "вперёд +0.03 м",
+                            "forward +0.03 m",
                             0.0,
                             p_holm=1.0,
                             factor={"kind": "com_offset", "offset": [0.03, 0.0, 0.0]},
@@ -124,19 +124,19 @@ class Step4DiagnoseTest(unittest.TestCase):
             [
                 _param(
                     "joint_damping",
-                    "демпфирование суставов",
+                    "joint damping",
                     "base",
                     [
                         _level(
                             "base",
-                            "базовое 1x",
+                            "baseline 1x",
                             0.40,
                             baseline=True,
                             factor={"kind": "damping", "scale": 1.0},
                         ),
                         _level(
                             "harsh",
-                            "жёсткое 10x",
+                            "harsh 10x",
                             0.10,
                             significant=True,
                             p_holm=0.01,
@@ -159,19 +159,19 @@ class Step4DiagnoseTest(unittest.TestCase):
             [
                 _param(
                     "joint_damping",
-                    "демпфирование суставов",
+                    "joint damping",
                     "base",
                     [
                         _level(
                             "base",
-                            "базовое 1x",
+                            "baseline 1x",
                             0.42,
                             baseline=True,
                             factor={"kind": "damping", "scale": 1.0},
                         ),
                         _level(
                             "harsh",
-                            "жёсткое 10x",
+                            "harsh 10x",
                             0.24,
                             significant=False,
                             p_holm=0.074,
@@ -188,26 +188,26 @@ class Step4DiagnoseTest(unittest.TestCase):
     def test_interpolate_noise_threshold(self) -> None:
         param = _param(
             "sensor_noise",
-            "шум датчиков",
+            "sensor noise",
             "none",
             [
                 _level(
                     "none",
-                    "без шума",
+                    "no noise",
                     0.0,
                     baseline=True,
                     factor={"kind": "noise", "q": 0.0, "v": 0.0},
                 ),
                 _level(
                     "medium",
-                    "средний шум",
+                    "medium noise",
                     0.0,
                     p_holm=1.0,
                     factor={"kind": "noise", "q": 0.03, "v": 0.3},
                 ),
                 _level(
                     "strong",
-                    "сильный шум",
+                    "high noise",
                     0.98,
                     significant=True,
                     p_holm=1e-13,
@@ -227,19 +227,19 @@ class Step4DiagnoseTest(unittest.TestCase):
             [
                 _param(
                     "floor_contact",
-                    "мягкость контакта пола",
+                    "floor contact softness",
                     "baseline",
                     [
                         _level(
                             "baseline",
-                            "базовый solref",
+                            "baseline solref",
                             0.0,
                             baseline=True,
                             factor={"kind": "contact", "preset": "baseline"},
                         ),
                         _level(
                             "soft",
-                            "податливый пол",
+                            "soft floor",
                             1.0,
                             significant=True,
                             p_holm=1e-14,
@@ -253,26 +253,26 @@ class Step4DiagnoseTest(unittest.TestCase):
                 ),
                 _param(
                     "sensor_noise",
-                    "шум датчиков",
+                    "sensor noise",
                     "none",
                     [
                         _level(
                             "none",
-                            "без шума",
+                            "no noise",
                             0.0,
                             baseline=True,
                             factor={"kind": "noise", "q": 0.0, "v": 0.0},
                         ),
                         _level(
                             "medium",
-                            "средний шум",
+                            "medium noise",
                             0.0,
                             p_holm=1.0,
                             factor={"kind": "noise", "q": 0.03, "v": 0.3},
                         ),
                         _level(
                             "strong",
-                            "сильный шум",
+                            "high noise",
                             0.98,
                             significant=True,
                             p_holm=1e-13,
@@ -282,19 +282,19 @@ class Step4DiagnoseTest(unittest.TestCase):
                 ),
                 _param(
                     "sensor_bias",
-                    "смещение нуля датчиков",
+                    "sensor bias",
                     "none",
                     [
                         _level(
                             "none",
-                            "без смещения",
+                            "no bias",
                             0.0,
                             baseline=True,
                             factor={"kind": "bias", "q": 0.0, "drift": 0.0},
                         ),
                         _level(
                             "weak_pos",
-                            "слабый +0.015 рад",
+                            "mild +0.015 rad",
                             0.38,
                             significant=True,
                             p_holm=1e-4,
@@ -302,7 +302,7 @@ class Step4DiagnoseTest(unittest.TestCase):
                         ),
                         _level(
                             "offset",
-                            "смещение нуля +0.05 рад",
+                            "bias +0.05 rad",
                             1.0,
                             significant=True,
                             p_holm=1e-14,
@@ -341,7 +341,7 @@ class Step4DiagnoseTest(unittest.TestCase):
     def test_cite_mentions_outcomes_rows(self) -> None:
         level = _level(
             "soft",
-            "податливый пол",
+            "soft floor",
             1.0,
             significant=True,
             p_holm=1e-14,

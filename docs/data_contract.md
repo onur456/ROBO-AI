@@ -38,7 +38,7 @@ The root is an object with 39 fields.
 | `run_mode` | string | `ofat` |
 | `pd` | string | `baseline` |
 | `scenario` | string | `default` |
-| `scenario_label` | string | `базовый: трение и боковой удар (Fy до ±350 Н)` |
+| `scenario_label` | string | `baseline: friction and lateral impact (Fy up to +/-350 N)` |
 | `friction_range` | array of number | `[0.05, 1.0]` |
 | `lateral_force_range` | array of number | `[-350.0, 350.0]` |
 | `stance_hold` | object | `friction`, `lateral_force`, `n_episodes`, `n_failures`, `failure_rate` |
@@ -109,7 +109,7 @@ One `levels[]` element:
 | Field | Type | Note from the file |
 | --- | --- | --- |
 | `id` | string | for example `zero` |
-| `label` | string | for example `базовый 0 м` |
+| `label` | string | for example `baseline 0 m` |
 | `factor` | object | the key set depends on the factor |
 | `n_episodes` | integer | `300` |
 | `n_failures` | integer | |
@@ -139,7 +139,7 @@ One `levels[]` element:
 | `p_mcnemar` | number or null | |
 | `p_holm` | number or null | |
 | `significant` | boolean | |
-| `effect_label` | string | the file contains `норма`, `в пределах шума`, `значимо` |
+| `effect_label` | string | the file contains `baseline`, `within noise`, `significant` |
 
 `fail_reasons` is not an episode field. It is a level object. The file contains an empty object, `{"stance_loss": 300}`, and `{"fall": 72, "stance_loss": 61}`.
 

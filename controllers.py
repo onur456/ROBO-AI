@@ -1,10 +1,10 @@
-"""Сменный интерфейс контроллера стойки Go2.
+"""Swappable Go2 stance-controller interface.
 
-Команда на шаге считается здесь. Шум и смещение датчиков, удержание команды,
-задержка и ограничение момента остаются снаружи, в цикле эпизода.
+The step command is computed here. Sensor noise and bias, command hold,
+delay, and the torque limit stay outside, in the episode loop.
 
-Спецификатор: ``pd``, ``stance_shift``, ``путь/к/файлу.py:Имя`` или ``пакет.модуль:Имя``.
-В параллельные воркеры уходит строка, объект контроллера создаётся уже внутри процесса.
+Spec: ``pd``, ``stance_shift``, ``path/to/file.py:Name``, or ``package.module:Name``.
+Workers receive the spec string; the controller object is created inside the process.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class StanceController(Protocol):
     name: str
 
     def reset(self) -> None:
-        """Сброс внутреннего состояния перед эпизодом."""
+        """Reset internal state before an episode."""
 
     def act(
         self,
@@ -37,11 +37,11 @@ class StanceController(Protocol):
         dt: float,
         target_qpos: np.ndarray,
     ) -> np.ndarray:
-        """Команда актуаторам по наблюдению суставов и целевой стойке."""
+        """Actuator command from the joint observation and the target stance."""
 
 
 class JointPDController:
-    """Текущий суставной PD: kp * (q_target - q) - kd * v."""
+    """Current joint PD: kp * (q_target - q) - kd * v."""
 
     def __init__(self, kp: float, kd: float, name: str = "pd", q_shift: float = 0.0):
         self.kp = float(kp)
@@ -67,14 +67,14 @@ class JointPDController:
 
 
 class StanceShiftController(JointPDController):
-    """Тот же PD, но целевая стойка сдвинута на постоянный угол."""
+    """The same PD, with the target stance shifted by a constant angle."""
 
     def __init__(self, kp: float, kd: float, shift: float = STANCE_SHIFT_RAD):
         super().__init__(kp, kd, name="stance_shift", q_shift=float(shift))
 
 
 class CallableController:
-    """Обёртка функции compute(obs, step, dt, target_qpos)."""
+    """Wrapper around compute(obs, step, dt, target_qpos)."""
 
     def __init__(self, fn, name: str, kp: float, kd: float):
         self.fn = fn
@@ -138,7 +138,7 @@ def _looks_like_file(location: str) -> bool:
 
 
 def canonical_controller_spec(spec: str) -> str:
-    """Встроенное имя, абсолютный путь.py:Атрибут или модуль:Атрибут."""
+    """Built-in name, absolute path.py:Attr, or module:Attr."""
     location, attr = _spec_parts(spec)
     if attr is None:
         return location
@@ -162,7 +162,7 @@ def _path_entry(entry: str) -> Path:
 
 
 def locate_module_root(module_name: str) -> str:
-    """Каталог из sys.path, из которого импортируется модуль."""
+    """sys.path directory from which the module is imported."""
     try:
         found = importlib.util.find_spec(module_name)
     except ModuleNotFoundError as exc:
@@ -197,7 +197,7 @@ def locate_module_root(module_name: str) -> str:
 
 
 def apply_import_root(root: str | None) -> None:
-    """Добавляет каталог модуля в sys.path текущего процесса (в том числе воркера)."""
+    """Add the module directory to sys.path of the current process, including a worker."""
     global CONTROLLER_IMPORT_ROOT
     if not root:
         return
@@ -208,7 +208,7 @@ def apply_import_root(root: str | None) -> None:
 
 
 def prepare_controller_spec(spec: str) -> tuple[str, str | None]:
-    """Канонический спецификатор и каталог импорта для воркеров."""
+    """Canonical spec and import directory for workers."""
     global CONTROLLER_IMPORT_ROOT
     canonical = canonical_controller_spec(spec)
     location, attr = _spec_parts(canonical)

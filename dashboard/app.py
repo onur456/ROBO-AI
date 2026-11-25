@@ -1,10 +1,9 @@
-"""Таблица эпизодов, доля сбоев и доверительный интервал Уилсона."""
+"""Episode table, failure rate, and Wilson confidence interval."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -56,7 +55,7 @@ OUTCOME_COLUMNS = [
 
 
 def cli_report_path() -> str:
-    """Путь из `streamlit run dashboard/app.py -- --report ...`."""
+    """Path from `streamlit run dashboard/app.py -- --report ...`."""
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--report", default=DEFAULT_PATH)
     args, _unknown = parser.parse_known_args()
@@ -72,10 +71,10 @@ def resolve_path(filepath: str) -> Path:
 
 @st.cache_data(show_spinner="Reading JSON…")
 def load_data(filepath: str) -> pd.DataFrame:
-    """Собрать outcomes из parameter_sweeps в одну таблицу.
+    """Flatten outcomes from parameter_sweeps into one table.
 
-    К каждой строке добавляются param_id (parameters[].id)
-    и level_label (levels[].label).
+    Each row gets param_id (parameters[].id)
+    and level_label (levels[].label).
     """
     path = resolve_path(filepath)
     with path.open(encoding="utf-8") as handle:
@@ -238,10 +237,10 @@ def episode_label(row: pd.Series) -> str:
 
 
 def reproduce_command(row: pd.Series) -> str:
-    """Команда из флагов, которые argparse в step3 реально принимает.
+    """Command built from flags that step3 argparse actually accepts.
 
-    Отдельного --seed нет: seed эпизода = 42 * 1000003 + номер эпизода,
-    а номер попадает в прогон через --episodes.
+    There is no --seed flag: the episode seed is 42 * 1000003 + episode number,
+    and the episode number is selected with --episodes.
     """
     scenario = row.get("scenario") or "nominal"
     pd_name = row.get("pd") or "baseline"
@@ -358,41 +357,8 @@ def comparison_table(result: dict) -> pd.DataFrame:
 
 
 def display_warning(note: str) -> str:
-    """Show paired_compare warnings in English. The numbers stay as computed."""
-    rules = (
-        (
-            r"seed не совпали полностью: только в A (\d+), только в B (\d+)",
-            r"Seeds do not fully overlap: only in A \1, only in B \2",
-        ),
-        (
-            r"повторные seed внутри прогона пропущены \(A (\d+), B (\d+)\)",
-            r"Duplicate seeds inside a run were skipped (A \1, B \2)",
-        ),
-        (
-            r"строки без seed пропущены \(A (\d+), B (\d+)\)",
-            r"Rows without a seed were skipped (A \1, B \2)",
-        ),
-        (
-            r"уровни без пары: только в A (\d+), только в B (\d+)",
-            r"Levels without a pair: only in A \1, only in B \2",
-        ),
-        (
-            r"z_ref различается: A ([0-9.]+) м, B ([0-9.]+) м",
-            r"z_ref differs: A \1 m, B \2 m",
-        ),
-        (
-            r"порог stance_loss по z различается: A z<([0-9.]+) м, B z<([0-9.]+) м",
-            r"stance_loss z threshold differs: A z<\1 m, B z<\2 m",
-        ),
-        (
-            r"порог stance_loss по slip различается: A slip>([0-9.]+) м, B slip>([0-9.]+) м",
-            r"stance_loss slip threshold differs: A slip>\1 m, B slip>\2 m",
-        ),
-    )
-    text = note
-    for pattern, replacement in rules:
-        text = re.sub(pattern, replacement, text)
-    return text
+    """Paired-compare warnings are already English."""
+    return note
 
 
 def render_compare_tab() -> None:

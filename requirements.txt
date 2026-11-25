@@ -4,5 +4,5 @@ pandas==3.1.1
 plotly==7.2.0
 statsmodels==0.15.0
 streamlit==1.67.0
-# необязательный вызов Gemini в step4_ai_diagnose.py; в текущем окружении пакет не установлен
+# optional Gemini call in step4_ai_diagnose.py; not installed in this environment
 google-genai

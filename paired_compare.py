@@ -1,7 +1,7 @@
-"""Парное сравнение двух прогонов по общим seed.
+"""Paired comparison of two runs on shared seeds.
 
-Доли и ДИ — wilson_ci, пары — mcnemar_exact_paired, семейство — holm_adjust
-из step3_batch_stress. Свои формулы не дублируются.
+Rates and CIs use wilson_ci, pairs use mcnemar_exact_paired, the family uses holm_adjust
+from step3_batch_stress. Those formulas are not duplicated here.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ def _seed_of(row: dict) -> int | None:
 
 
 def index_by_seed(outcomes: list[dict]) -> tuple[dict[int, bool], dict]:
-    """Первое вхождение seed. Повтор и строки без seed не затирают пару."""
+    """First occurrence of a seed. Duplicates and rows without a seed do not overwrite the pair."""
     by: dict[int, bool] = {}
     duplicate: list[int] = []
     missing = 0
@@ -52,7 +52,7 @@ def index_by_seed(outcomes: list[dict]) -> tuple[dict[int, bool], dict]:
 
 
 def collect_units(payload) -> list[dict]:
-    """Сопоставимые уровни: сценарий / фактор / уровень, либо один плоский список."""
+    """Comparable levels: scenario / factor / level, or one flat list."""
     if isinstance(payload, list):
         return [
             {
@@ -142,7 +142,7 @@ def _pair_level(before: dict, after: dict) -> dict:
         "n_discordant": 0,
         "pvalue": None,
     }
-    # В таблице Шага 3: n10 = base жив, treat сбой (0->1); n01 = base сбой, treat жив (1->0).
+    # Step 3 table: n10 = base ok, treat fail (0->1); n01 = base fail, treat ok (1->0).
     n_0_to_1 = int(mc["n10"])
     n_1_to_0 = int(mc["n01"])
     block_a = _rate_block(a_flags)
@@ -198,7 +198,7 @@ def _pick(*values):
 
 
 def run_context(payload) -> dict:
-    """Контроллер и эталон стойки, если они есть в JSON прогона."""
+    """Controller and stance reference, when the run JSON stores them."""
     if not isinstance(payload, dict):
         return {}
     stance = payload.get("stance_reference")

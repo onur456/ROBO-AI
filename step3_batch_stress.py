@@ -86,42 +86,42 @@ LIMIT_ACTIVE_NOTE = "saturation active"
 SCENARIOS = {
     "default": {
         "id": "default",
-        "label": "базовый: трение и боковой удар (Fy до ±350 Н)",
+        "label": "baseline: friction and lateral impact (Fy up to +/-350 N)",
         "friction_range": FRICTION_RANGE,
         "lateral_force_range": LATERAL_FORCE_RANGE,
         "probe_force": PROBE_LATERAL_FORCE,
     },
     "nominal": {
         "id": "nominal",
-        "label": "nominal: μ 0.6–1.0, Fy до ±100 Н",
+        "label": "nominal: mu 0.6-1.0, Fy up to +/-100 N",
         "friction_range": NOMINAL_FRICTION_RANGE,
         "lateral_force_range": NOMINAL_FORCE_RANGE,
         "probe_force": 80.0,
     },
     "moderate": {
         "id": "moderate",
-        "label": "moderate: μ 0.4–1.0, Fy до ±250 Н",
+        "label": "moderate: mu 0.4-1.0, Fy up to +/-250 N",
         "friction_range": MODERATE_FRICTION_RANGE,
         "lateral_force_range": MODERATE_FORCE_RANGE,
         "probe_force": 180.0,
     },
     "extreme": {
         "id": "extreme",
-        "label": "extreme: μ 0.05–1.0, Fy до ±350 Н (прежний default)",
+        "label": "extreme: mu 0.05-1.0, Fy up to +/-350 N (former default)",
         "friction_range": FRICTION_RANGE,
         "lateral_force_range": LATERAL_FORCE_RANGE,
         "probe_force": PROBE_LATERAL_FORCE,
     },
     "slip_only": {
         "id": "slip_only",
-        "label": "скольжение и стойка без бокового удара (Fy=0)",
+        "label": "slip and stance without a lateral impact (Fy=0)",
         "friction_range": FRICTION_RANGE,
         "lateral_force_range": (0.0, 0.0),
         "probe_force": 0.0,
     },
     "heavy_impact": {
         "id": "heavy_impact",
-        "label": "усиленный боковой удар (Fy до ±500 Н)",
+        "label": "stronger lateral impact (Fy up to +/-500 N)",
         "friction_range": FRICTION_RANGE,
         "lateral_force_range": HEAVY_FORCE_RANGE,
         "probe_force": 250.0,
@@ -162,88 +162,88 @@ BIAS_PROBE_VARIANTS = (
 PARAMETER_SWEEPS = (
     {
         "id": "com_x",
-        "name": "смещение COM по X",
+        "name": "COM offset along X",
         "baseline": "zero",
         "levels": (
             {
                 "id": "zero",
-                "label": "базовый 0 м",
+                "label": "baseline 0 m",
                 "factor": {"kind": "com_offset", "offset": [0.0, 0.0, 0.0]},
             },
             {
                 "id": "neg",
-                "label": "назад −0.03 м",
+                "label": "backward -0.03 m",
                 "factor": {"kind": "com_offset", "offset": [-0.03, 0.0, 0.0]},
             },
             {
                 "id": "pos",
-                "label": "вперёд +0.03 м",
+                "label": "forward +0.03 m",
                 "factor": {"kind": "com_offset", "offset": [0.03, 0.0, 0.0]},
             },
         ),
     },
     {
         "id": "com_y",
-        "name": "смещение COM по Y",
+        "name": "COM offset along Y",
         "baseline": "zero",
         "levels": (
             {
                 "id": "zero",
-                "label": "базовый 0 м",
+                "label": "baseline 0 m",
                 "factor": {"kind": "com_offset", "offset": [0.0, 0.0, 0.0]},
             },
             {
                 "id": "weak_neg",
-                "label": "слабый −0.02 м",
+                "label": "mild -0.02 m",
                 "factor": {"kind": "com_offset", "offset": [0.0, -0.02, 0.0]},
             },
             {
                 "id": "weak_pos",
-                "label": "слабый +0.02 м",
+                "label": "mild +0.02 m",
                 "factor": {"kind": "com_offset", "offset": [0.0, 0.02, 0.0]},
             },
             {
                 "id": "harsh_neg",
-                "label": "жёсткий −0.04 м",
+                "label": "harsh -0.04 m",
                 "factor": {"kind": "com_offset", "offset": [0.0, -0.04, 0.0]},
             },
             {
                 "id": "harsh_pos",
-                "label": "жёсткий +0.04 м",
+                "label": "harsh +0.04 m",
                 "factor": {"kind": "com_offset", "offset": [0.0, 0.04, 0.0]},
             },
         ),
     },
     {
         "id": "com_z",
-        "name": "смещение COM по Z",
+        "name": "COM offset along Z",
         "baseline": "zero",
         "levels": (
             {
                 "id": "zero",
-                "label": "базовый 0 м",
+                "label": "baseline 0 m",
                 "factor": {"kind": "com_offset", "offset": [0.0, 0.0, 0.0]},
             },
             {
                 "id": "weak",
-                "label": "слабый +0.015 м",
+                "label": "mild +0.015 m",
                 "factor": {"kind": "com_offset", "offset": [0.0, 0.0, 0.015]},
             },
             {
                 "id": "harsh",
-                "label": "жёсткий +0.03 м",
+                "label": "harsh +0.03 m",
                 "factor": {"kind": "com_offset", "offset": [0.0, 0.0, 0.03]},
             },
         ),
     },
     {
         "id": "torque_limit",
-        "name": "ограничение момента моторов",
+        "name": "motor torque limit",
         "baseline": "full",
         "levels": (
             {
                 "id": "full",
-                "label": "базовый 100% ctrlrange",
+                "label": "baseline 100% ctrlrange",
                 "factor": {"kind": "torque_limit", "scale": 1.0},
             },
             {
@@ -260,61 +260,61 @@ PARAMETER_SWEEPS = (
     },
     {
         "id": "action_delay",
-        "name": "задержка команд",
+        "name": "command delay",
         "baseline": "zero",
         "levels": (
             {
                 "id": "zero",
-                "label": "базовая 0 шагов",
+                "label": "baseline 0 steps",
                 "factor": {"kind": "delay", "steps": 0},
             },
             {
                 "id": "weak",
-                "label": "слабая 5 шагов",
+                "label": "mild 5 steps",
                 "factor": {"kind": "delay", "steps": 5},
             },
             {
                 "id": "harsh",
-                "label": "жёсткая 15 шагов",
+                "label": "harsh 15 steps",
                 "factor": {"kind": "delay", "steps": 15},
             },
         ),
     },
     {
         "id": "joint_damping",
-        "name": "демпфирование суставов",
+        "name": "joint damping",
         "baseline": "base",
         "levels": (
             {
                 "id": "base",
-                "label": "базовое 1x",
+                "label": "baseline 1x",
                 "factor": {"kind": "damping", "scale": 1.0},
             },
             {
                 "id": "weak",
-                "label": "слабое 0x",
+                "label": "mild 0x",
                 "factor": {"kind": "damping", "scale": 0.0},
             },
             {
                 "id": "harsh",
-                "label": "жёсткое 10x",
+                "label": "harsh 10x",
                 "factor": {"kind": "damping", "scale": 10.0},
             },
         ),
     },
     {
         "id": "floor_contact",
-        "name": "мягкость контакта пола",
+        "name": "floor contact softness",
         "baseline": "baseline",
         "levels": (
             {
                 "id": "baseline",
-                "label": "базовый solref",
+                "label": "baseline solref",
                 "factor": {"kind": "contact", "preset": "baseline"},
             },
             {
                 "id": "stiff",
-                "label": "жёсткий пол",
+                "label": "stiff floor",
                 "factor": {
                     "kind": "contact",
                     "preset": "stiff",
@@ -324,7 +324,7 @@ PARAMETER_SWEEPS = (
             },
             {
                 "id": "soft",
-                "label": "податливый пол",
+                "label": "soft floor",
                 "factor": {
                     "kind": "contact",
                     "preset": "soft",
@@ -336,76 +336,76 @@ PARAMETER_SWEEPS = (
     },
     {
         "id": "sensor_noise",
-        "name": "шум датчиков",
+        "name": "sensor noise",
         "baseline": "none",
         "levels": (
             {
                 "id": "none",
-                "label": "без шума",
+                "label": "no noise",
                 "factor": {"kind": "noise", "q": 0.0, "v": 0.0},
             },
             {
                 "id": "medium",
-                "label": "средний шум",
+                "label": "medium noise",
                 "factor": {"kind": "noise", "q": 0.03, "v": 0.3},
             },
             {
                 "id": "strong",
-                "label": "сильный шум",
+                "label": "high noise",
                 "factor": {"kind": "noise", "q": 0.12, "v": 1.2},
             },
         ),
     },
     {
         "id": "control_hold",
-        "name": "частота обновления команды",
+        "name": "command update rate",
         "baseline": "every",
         "levels": (
             {
                 "id": "every",
-                "label": "каждый шаг (500 Гц)",
+                "label": "every step (500 Hz)",
                 "factor": {"kind": "ctrl_hold", "steps": 1},
             },
             {
                 "id": "weak",
-                "label": "каждые 5 шагов (100 Гц)",
+                "label": "every 5 steps (100 Hz)",
                 "factor": {"kind": "ctrl_hold", "steps": 5},
             },
             {
                 "id": "harsh",
-                "label": "каждые 20 шагов (25 Гц)",
+                "label": "every 20 steps (25 Hz)",
                 "factor": {"kind": "ctrl_hold", "steps": 20},
             },
         ),
     },
     {
         "id": "sensor_bias",
-        "name": "смещение нуля датчиков",
+        "name": "sensor bias",
         "baseline": "none",
         "levels": (
             {
                 "id": "none",
-                "label": "без смещения",
+                "label": "no bias",
                 "factor": {"kind": "bias", "q": 0.0, "drift": 0.0},
             },
             {
                 "id": "weak_neg",
-                "label": "слабый −0.015 рад",
+                "label": "mild -0.015 rad",
                 "factor": {"kind": "bias", "q": -0.015, "drift": 0.0},
             },
             {
                 "id": "weak_pos",
-                "label": "слабый +0.015 рад",
+                "label": "mild +0.015 rad",
                 "factor": {"kind": "bias", "q": 0.015, "drift": 0.0},
             },
             {
                 "id": "offset",
-                "label": "смещение нуля +0.05 рад",
+                "label": "bias +0.05 rad",
                 "factor": {"kind": "bias", "q": 0.05, "drift": 0.0},
             },
             {
                 "id": "drift",
-                "label": "дрейф +0.0002 рад/шаг",
+                "label": "drift +0.0002 rad/step",
                 "factor": {"kind": "bias", "q": 0.0, "drift": 0.0002},
             },
         ),
@@ -616,7 +616,7 @@ def outcome_record(ep: dict) -> dict:
 
 
 def mcnemar_exact_paired(base_outcomes: list[dict], treat_outcomes: list[dict]) -> dict:
-    """Точный Макнемар на парных бинарных исходах (одинаковые episode/seed)."""
+    """Exact McNemar on paired binary outcomes (shared episode/seed)."""
     from statsmodels.stats.contingency_tables import mcnemar
 
     base_by = {int(o["episode"]): bool(o["failed"]) for o in base_outcomes}
@@ -894,7 +894,7 @@ def set_sliding_friction(model: mujoco.MjModel, geom_ids: list[int], friction: f
         actual = float(model.geom_friction[geom_id, 0])
         if abs(actual - friction) > 1e-12:
             raise RuntimeError(
-                f"не удалось записать geom_friction[{geom_id}, 0]={friction}, сейчас {actual}"
+                f"failed to write geom_friction[{geom_id}, 0]={friction}, current value {actual}"
             )
 
 
@@ -936,8 +936,8 @@ def write_body_ipos(
     written = read_body_ipos(model, body_id)
     if float(np.max(np.abs(written - np.asarray(ipos, dtype=float)))) > 1e-12:
         raise RuntimeError(
-            f"не удалось записать body_ipos[{body_id}]={np.asarray(ipos).tolist()}, "
-            f"сейчас {written.tolist()}"
+            f"failed to write body_ipos[{body_id}]={np.asarray(ipos).tolist()}, "
+            f"current value {written.tolist()}"
         )
     mujoco.mj_setConst(model, data)
     return written
@@ -951,7 +951,7 @@ def write_ctrlrange(model: mujoco.MjModel, ctrlrange: np.ndarray) -> np.ndarray:
     model.actuator_ctrlrange[:] = ctrlrange
     written = read_ctrlrange(model)
     if float(np.max(np.abs(written - np.asarray(ctrlrange, dtype=float)))) > 1e-12:
-        raise RuntimeError("не удалось записать actuator_ctrlrange")
+        raise RuntimeError("failed to write actuator_ctrlrange")
     return written
 
 
@@ -1024,7 +1024,7 @@ def joint_observation(
     noise_v: float,
     bias_q: float,
 ) -> dict:
-    """Наблюдение суставов. Шум и смещение одинаковы для любого контроллера."""
+    """Joint observation. Noise and bias are the same for every controller."""
     q_obs = np.asarray(data.qpos[7:], dtype=float)
     v_obs = np.asarray(data.qvel[6:], dtype=float)
     if rng is not None and (noise_q > 0.0 or noise_v > 0.0):
@@ -1208,7 +1208,7 @@ def write_dof_damping(model: mujoco.MjModel, damping: np.ndarray) -> np.ndarray:
     model.dof_damping[:] = damping
     written = read_dof_damping(model)
     if float(np.max(np.abs(written - np.asarray(damping, dtype=float)))) > 1e-12:
-        raise RuntimeError("не удалось записать dof_damping")
+        raise RuntimeError("failed to write dof_damping")
     return written
 
 
@@ -1223,8 +1223,8 @@ def write_body_inertia(
     written = read_body_inertia(model, body_id)
     if float(np.max(np.abs(written - np.asarray(inertia, dtype=float)))) > 1e-12:
         raise RuntimeError(
-            f"не удалось записать body_inertia[{body_id}]={np.asarray(inertia).tolist()}, "
-            f"сейчас {written.tolist()}"
+            f"failed to write body_inertia[{body_id}]={np.asarray(inertia).tolist()}, "
+            f"current value {written.tolist()}"
         )
     mujoco.mj_setConst(model, data)
     return written
@@ -1249,9 +1249,9 @@ def write_geom_contact(
         model.geom_solimp[geom_id] = solimp[i]
     written_ref, written_imp = read_geom_contact(model, geom_ids)
     if float(np.max(np.abs(written_ref - solref))) > 1e-12:
-        raise RuntimeError("не удалось записать geom_solref")
+        raise RuntimeError("failed to write geom_solref")
     if float(np.max(np.abs(written_imp - solimp))) > 1e-12:
-        raise RuntimeError("не удалось записать geom_solimp")
+        raise RuntimeError("failed to write geom_solimp")
     return written_ref, written_imp
 
 
@@ -1823,9 +1823,9 @@ def probe_friction_effect(
     ]
     for result in results:
         status = (
-            f"упал на шаге {result['fail_step']}"
+            f"failed at step {result['fail_step']}"
             if result["fail_step"] is not None
-            else "устоял"
+            else "survived"
         )
         print(
             f"  mu={result['friction']:.2f}: written {result['written_sliding']}, "
@@ -1883,9 +1883,9 @@ def probe_com_offset(
             result["ipos"] = written.tolist()
             results.append(result)
             status = (
-                f"упал на шаге {result['fail_step']}"
+                f"failed at step {result['fail_step']}"
                 if result["fail_step"] is not None
-                else "устоял"
+                else "survived"
             )
             print(
                 f"  {label}: offset={list(offset)} ipos={written.tolist()}  "
@@ -1895,8 +1895,8 @@ def probe_com_offset(
         restored = write_body_ipos(model, data, torso_body_id, origin)
         if float(np.max(np.abs(restored - origin))) > 1e-12:
             raise RuntimeError(
-                f"не удалось восстановить body_ipos[{torso_body_id}]={origin.tolist()}, "
-                f"сейчас {restored.tolist()}"
+                f"failed to restore body_ipos[{torso_body_id}]={origin.tolist()}, "
+                f"current value {restored.tolist()}"
             )
         print(f"  COM restored: body_ipos={restored.tolist()}")
 
@@ -1957,7 +1957,7 @@ def probe_torque_limit(
             results.append(result)
             hip_limit = float(np.min(np.abs(written[0])))
             calf_limit = float(np.min(np.abs(written[2])))
-            hit = "да" if result["hit_limit"] else "нет"
+            hit = "yes" if result["hit_limit"] else "no"
             sat = float(result["saturation_frac"])
             print(
                 f"  {label} ctrlrange: hip=[{written[0, 0]:.2f}, {written[0, 1]:.2f}] "
@@ -1972,7 +1972,7 @@ def probe_torque_limit(
     finally:
         restored = apply_torque_limit(model, 1.0)
         if float(np.max(np.abs(restored - origin))) > 1e-12:
-            raise RuntimeError("не удалось восстановить actuator_ctrlrange")
+            raise RuntimeError("failed to restore actuator_ctrlrange")
         print(
             f"  ctrlrange restored: hip=[{restored[0, 0]:.2f}, {restored[0, 1]:.2f}]"
         )
@@ -2087,7 +2087,7 @@ def probe_joint_damping(
     finally:
         restored = write_dof_damping(model, origin)
         if float(np.max(np.abs(restored - origin))) > 1e-12:
-            raise RuntimeError("не удалось восстановить dof_damping")
+            raise RuntimeError("failed to restore dof_damping")
         print(f"  dof_damping restored: legs={restored[legs].tolist()}")
 
     any_diff = print_z_deltas(results, "label")
@@ -2138,7 +2138,7 @@ def probe_body_inertia(
     finally:
         restored = write_body_inertia(model, data, torso_body_id, origin)
         if float(np.max(np.abs(restored - origin))) > 1e-12:
-            raise RuntimeError("не удалось восстановить body_inertia")
+            raise RuntimeError("failed to restore body_inertia")
         print(f"  body_inertia restored: {restored.tolist()}")
 
     any_diff = print_z_deltas(results, "label")
@@ -2291,7 +2291,7 @@ def probe_sensor_bias(
         results.append(result)
         print_probe_line(
             result,
-            extra=f"bias={bias_q:g} рад  drift={drift_q:g} рад/шаг",
+            extra=f"bias={bias_q:g} rad  drift={drift_q:g} rad/step",
             ref=results[0],
         )
     any_diff = print_z_deltas(results, "label")
@@ -2321,7 +2321,7 @@ def probe_stance_hold(
         kp=kp,
         kd=kd,
     )
-    status = "упал" if result["fail_step"] is not None else "устоял"
+    status = "failed" if result["fail_step"] is not None else "survived"
     print(
         f"stance check kp={kp:g} kd={kd:g}: z_start={result['z_start']:.4f} "
         f"z_end={result['z_end']:.4f} {status}"
@@ -2775,7 +2775,7 @@ def run_parameter_sweeps(
         for row in levels_out:
             lo, hi = row.get("failure_rate_ci95") or (0.0, 0.0)
             if row["id"] == baseline["id"]:
-                extra = "норма"
+                extra = "baseline"
             else:
                 p_raw = row.get("p_mcnemar")
                 p_h = row.get("p_holm")
@@ -3010,7 +3010,7 @@ def run_force_mu_grid(
             batch = run_stress_batch_parallel(specs, kp, kd, False, target_qpos)
             row = grid_row_from_batch(float(mu), float(fy), batch, meta)
             rows.append(row)
-            print_batch_rates(f"  μ={mu:g} Fy={fy:6.1f} Н: ", batch)
+            print_batch_rates(f"  mu={mu:g} Fy={fy:6.1f} N: ", batch)
     return rows, meta
 
 
@@ -3082,8 +3082,8 @@ def run_bias_offset_check(target_qpos: np.ndarray, kp: float, kd: float) -> dict
         target_qpos,
         factor={"kind": "bias", "q": 0.05, "drift": 0.0},
     )
-    print_batch_rates("  без смещения: ", base)
-    print_batch_rates("  +0.05 рад:     ", biased)
+    print_batch_rates("  no bias: ", base)
+    print_batch_rates("  +0.05 rad:    ", biased)
     return {"none": batch_rate_summary(base), "offset": batch_rate_summary(biased)}
 
 
@@ -3124,14 +3124,14 @@ def run_scenario_rate_check(target_qpos: np.ndarray, kp: float, kd: float) -> li
 
 def run_baseline_grid(target_qpos: np.ndarray, kp: float, kd: float) -> list[dict]:
     rows, meta = run_force_mu_grid(
-        target_qpos, kp, kd, GRID_MU, GRID_FY, N_GRID_EPISODES, "сетка Fy/μ"
+        target_qpos, kp, kd, GRID_MU, GRID_FY, N_GRID_EPISODES, "Fy/mu grid"
     )
     write_csv(GRID_PATH, rows, GRID_CSV_FIELDS)
     print(f"grid saved: {GRID_PATH}")
-    print_grid_table(rows, GRID_MU, GRID_FY, "failure_rate", "доля сбоев (tilt ИЛИ stance_loss)")
-    print_grid_table(rows, GRID_MU, GRID_FY, "tilt_rate", "доля tilt")
-    print_grid_table(rows, GRID_MU, GRID_FY, "stance_loss_rate", "доля stance_loss")
-    print_grid_table(rows, GRID_MU, GRID_FY, "sag_rate", "доля просадки z<0.20 (метрика)")
+    print_grid_table(rows, GRID_MU, GRID_FY, "failure_rate", "failure rate (tilt OR stance_loss)")
+    print_grid_table(rows, GRID_MU, GRID_FY, "tilt_rate", "tilt rate")
+    print_grid_table(rows, GRID_MU, GRID_FY, "stance_loss_rate", "stance_loss rate")
+    print_grid_table(rows, GRID_MU, GRID_FY, "sag_rate", "sag rate z<0.20 (metric)")
     unique_rates = {round(float(r["failure_rate"]), 6) for r in rows}
     if unique_rates <= {0.0, 1.0}:
         print("  warning: every grid cell is still 0% or 100%")
@@ -3153,7 +3153,7 @@ def run_baseline_grid(target_qpos: np.ndarray, kp: float, kd: float) -> list[dic
 
 def run_cliff_grid(target_qpos: np.ndarray, kp: float, kd: float) -> list[dict]:
     rows, meta = run_force_mu_grid(
-        target_qpos, kp, kd, CLIFF_MU, CLIFF_FY, N_GRID_EPISODES, "тонкая сетка около обрыва"
+        target_qpos, kp, kd, CLIFF_MU, CLIFF_FY, N_GRID_EPISODES, "fine grid near the cliff"
     )
     write_csv(CLIFF_PATH, rows, GRID_CSV_FIELDS)
     print(f"fine grid saved: {CLIFF_PATH}")
@@ -3163,7 +3163,7 @@ def run_cliff_grid(target_qpos: np.ndarray, kp: float, kd: float) -> list[dict]:
         subset.sort(key=lambda r: r["fy"])
         series.append(
             {
-                "label": f"μ={mu:g} сбой",
+                "label": f"mu={mu:g} failure",
                 "x": [r["fy"] for r in subset],
                 "y": [r["failure_rate"] for r in subset],
                 "y_lo": [r["failure_ci_lo"] for r in subset],
@@ -3172,7 +3172,7 @@ def run_cliff_grid(target_qpos: np.ndarray, kp: float, kd: float) -> list[dict]:
         )
         series.append(
             {
-                "label": f"μ={mu:g} просадка z<0.20",
+                "label": f"mu={mu:g} sag z<0.20",
                 "x": [r["fy"] for r in subset],
                 "y": [r["sag_rate"] for r in subset],
                 "y_lo": [r["sag_ci_lo"] for r in subset],
@@ -3182,9 +3182,9 @@ def run_cliff_grid(target_qpos: np.ndarray, kp: float, kd: float) -> list[dict]:
     write_line_svg(
         CLIFF_SVG_PATH,
         series,
-        title="Доля сбоев против Fy (Уилсон 95%)",
-        xlabel="Fy, Н",
-        ylabel="доля",
+        title="Failure rate vs Fy (Wilson 95%)",
+        xlabel="Fy, N",
+        ylabel="rate",
         y_min=0.0,
         y_max=1.0,
     )
@@ -3289,16 +3289,16 @@ def run_mu02_traces(
     write_line_svg(
         MU02_Z_SVG_PATH,
         z_series,
-        title="μ=0.2: высота корпуса z(t)",
-        xlabel="t, с",
-        ylabel="z, м",
+        title="mu=0.2: torso height z(t)",
+        xlabel="t, s",
+        ylabel="z, m",
     )
     write_line_svg(
         MU02_ROLL_SVG_PATH,
         roll_series,
-        title="μ=0.2: крен roll(t)",
-        xlabel="t, с",
-        ylabel="крен, град",
+        title="mu=0.2: roll(t)",
+        xlabel="t, s",
+        ylabel="roll, deg",
     )
     payload = {
         "seed": SEED,
@@ -3370,14 +3370,14 @@ def run_sag_compare(
     variants = (
         {
             "id": "baseline",
-            "label": "текущий PD kp=25 kd=1.5, без FF",
+            "label": "current PD kp=25 kd=1.5, no FF",
             "kp": 25.0,
             "kd": 1.5,
             "factor": None,
         },
         {
             "id": "stiff",
-            "label": "повышенный kp=40 kd=3.0",
+            "label": "raised kp=40 kd=3.0",
             "kp": 40.0,
             "kd": 3.0,
             "factor": None,
@@ -3391,7 +3391,7 @@ def run_sag_compare(
         },
         {
             "id": "keyframe_ff",
-            "label": "kp=25 kd=1.5 + ctrl из keyframe home как FF",
+            "label": "kp=25 kd=1.5 + keyframe-home ctrl as FF",
             "kp": 25.0,
             "kd": 1.5,
             "factor": {"kind": "pd_variant", "ctrl": {"keyframe_ff": True}},
@@ -3484,7 +3484,7 @@ def run_sag_compare(
         {
             "seed": SEED,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "note": "PD по умолчанию не изменён. Выбор варианта — за оператором.",
+            "note": "Default PD is unchanged. The operator chooses the variant.",
             "rows": rows,
         },
     )
@@ -3503,8 +3503,8 @@ def compare_ofat_sweeps(sweeps: list[dict]) -> None:
         left = nom_params.get(param["id"])
         if left is None:
             continue
-        nom_sig = left.get("significant_leader_label") or "нет значимых"
-        mod_sig = param.get("significant_leader_label") or "нет значимых"
+        nom_sig = left.get("significant_leader_label") or "none significant"
+        mod_sig = param.get("significant_leader_label") or "none significant"
         print(
             f"  {param['name']}: nominal worst {left['worst_label']} "
             f"{left['worst_failure_rate'] * 100:.1f}% "
@@ -3619,7 +3619,7 @@ def run_pd_comparison(
         if keep_windows:
             main_batch = batch
     if main_batch is None:
-        raise RuntimeError("не удалось выполнить основной прогон PD")
+        raise RuntimeError("failed to run the main PD batch")
     return main_batch
 
 
@@ -3989,7 +3989,7 @@ def fit_outcome_thresholds(episodes: list[dict], z_ref: float) -> dict:
         dtype=float,
     )
     if zs.size == 0:
-        raise RuntimeError("нет стоячих эпизодов nominal для порога stance_loss")
+        raise RuntimeError("no standing nominal episodes for the stance_loss threshold")
     z_std = float(zs.std(ddof=1)) if zs.size > 1 else 0.0
     slip_std = float(slips.std(ddof=1)) if slips.size > 1 else 0.0
     z_min = float(zs.min())
@@ -4167,7 +4167,7 @@ def run_criteria_analysis(
         f"  slip max={derivation['slip_max']:.4f} σ={derivation['slip_std']:.4f} "
         f"threshold={derivation['slip_threshold']:.4f}"
     )
-    print_criteria_rates("  nominal после порога: ", nom_counts)
+    print_criteria_rates("  nominal after the threshold: ", nom_counts)
     write_json(THRESHOLDS_PATH, derivation)
 
     cells = {"nominal": nom}
@@ -4252,9 +4252,9 @@ def run_criteria_analysis(
     write_line_svg(
         CRITERIA_SVG_PATH,
         series,
-        title="Доля сбоев vs frac·z_ref (Уилсон 95%)",
+        title="Failure rate vs frac*z_ref (Wilson 95%)",
         xlabel="frac",
-        ylabel="доля сбоев",
+        ylabel="failure rate",
         y_min=0.0,
         y_max=1.0,
     )
@@ -4272,8 +4272,8 @@ def run_criteria_analysis(
         "degradation": {
             "used": False,
             "reason": (
-                "порог −3% от z_ref лежит ниже z_threshold (min−3σ), "
-                "событие вложено в stance_loss и в fail не входит"
+                "the -3% of z_ref threshold sits below z_threshold (min-3 sigma), "
+                "so the event is inside stance_loss and is not a separate fail"
             ),
         },
         "z_ref": z_ref,
@@ -4371,16 +4371,16 @@ def run_ice_nonmonotonic_traces(
                     "color": colors[fy],
                 }
             )
-        write_line_svg(path, ser, title=ylabel, xlabel="t, с", ylabel=ylabel)
+        write_line_svg(path, ser, title=ylabel, xlabel="t, s", ylabel=ylabel)
         return str(path)
 
     paths = {
-        "z": series_for("z", "μ=0.2 z(t)", ICE_TRACE_DIR / "ice_mu02_z.svg"),
-        "roll": series_for("roll_deg", "μ=0.2 крен, град", ICE_TRACE_DIR / "ice_mu02_roll.svg"),
-        "speed": series_for("speed", "μ=0.2 скорость корпуса, м/с", ICE_TRACE_DIR / "ice_mu02_speed.svg"),
+        "z": series_for("z", "mu=0.2 z(t)", ICE_TRACE_DIR / "ice_mu02_z.svg"),
+        "roll": series_for("roll_deg", "mu=0.2 roll, deg", ICE_TRACE_DIR / "ice_mu02_roll.svg"),
+        "speed": series_for("speed", "mu=0.2 torso speed, m/s", ICE_TRACE_DIR / "ice_mu02_speed.svg"),
         "spread": series_for(
             "foot_spread",
-            "μ=0.2 среднее |стопа−корпус| xy, м",
+            "mu=0.2 mean |foot-torso| xy, m",
             ICE_TRACE_DIR / "ice_mu02_foot_rel.svg",
         ),
     }
@@ -4636,7 +4636,7 @@ def run_pd_ff_variant(
         "fy_crit_base": base_crit,
         "fy_crit_pd_ff": ff_crit,
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "note": "вариант контроллера, база kp=40 kd=3 без FF не изменена",
+        "note": "controller variant; baseline kp=40 kd=3 without FF is unchanged",
     }
     write_json(Path("reports") / "pd_ff_compare.json", payload)
     print(
@@ -4882,7 +4882,7 @@ def main() -> None:
     target_qpos = np.array(data.qpos[7:], copy=True)
     if model.nu != len(target_qpos):
         raise RuntimeError(
-            f"число актуаторов ({model.nu}) не совпадает с числом суставов ({len(target_qpos)})"
+            f"actuator count ({model.nu}) does not match joint count ({len(target_qpos)})"
         )
     STANCE_REF["frac"] = float(args.stance_loss_frac)
     measure_stance_reference(
@@ -4996,7 +4996,7 @@ def main() -> None:
                 "run_mode": run_mode,
                 "seed": SEED,
                 "created_at": datetime.now(timezone.utc).isoformat(),
-                "note": "PD по умолчанию не изменён. Выбор варианта — за оператором.",
+                "note": "Default PD is unchanged. The operator chooses the variant.",
                 "rows": rows,
             },
         )
