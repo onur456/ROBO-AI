@@ -465,6 +465,7 @@ def render_batch_tab() -> None:
     failed_mode = st.sidebar.selectbox(
         "Outcome (failed)",
         options=(FILTER_ALL, FILTER_FAILED, FILTER_SURVIVED),
+        filter_mode=None,
     )
 
     by_param = apply_filters(frame, selected_params, FILTER_ALL)
