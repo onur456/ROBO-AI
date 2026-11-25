@@ -1166,7 +1166,7 @@ def print_probe_line(result: dict, extra: str = "", ref: dict | None = None) -> 
     prefix = f"{extra} " if extra else ""
     print(
         f"  {result['label']}: {prefix}{episode_status(result)}, "
-        f"z_end={result['z_end']:.4f}, z_min={result['z_min']:.4f}{dz}"
+        f"z_end={result['z_end']:.4f}, z_min={result['min_z']:.4f}{dz}"
     )
 
 
@@ -1830,7 +1830,7 @@ def probe_friction_effect(
         print(
             f"  mu={result['friction']:.2f}: written {result['written_sliding']}, "
             f"contact.friction={result['contact_friction']}, {status}, "
-            f"z_end={result['z_end']:.4f}, z_min={result['z_min']:.4f}, "
+            f"z_end={result['z_end']:.4f}, z_min={result['min_z']:.4f}, "
             f"y_end={result['y_end']:.4f}, max|y|={result['max_abs_y']:.4f}"
         )
 
@@ -1889,7 +1889,7 @@ def probe_com_offset(
             )
             print(
                 f"  {label}: offset={list(offset)} ipos={written.tolist()}  "
-                f"{status}, z_end={result['z_end']:.4f}, z_min={result['z_min']:.4f}"
+                f"{status}, z_end={result['z_end']:.4f}, z_min={result['min_z']:.4f}"
             )
     finally:
         restored = write_body_ipos(model, data, torso_body_id, origin)
@@ -2033,7 +2033,7 @@ def probe_action_delay(
         results.append(result)
         print(
             f"  {label}: {episode_status(result)}, "
-            f"z_end={result['z_end']:.4f}, z_min={result['z_min']:.4f}"
+            f"z_end={result['z_end']:.4f}, z_min={result['min_z']:.4f}"
         )
     any_diff = print_z_deltas(results, "label")
     if not any_diff:
@@ -2082,7 +2082,7 @@ def probe_joint_damping(
             print(
                 f"  {label}: leg_damping={written[legs].tolist()}  "
                 f"{episode_status(result)}, z_end={result['z_end']:.4f}, "
-                f"z_min={result['z_min']:.4f}"
+                f"z_min={result['min_z']:.4f}"
             )
     finally:
         restored = write_dof_damping(model, origin)

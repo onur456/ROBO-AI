@@ -107,26 +107,42 @@ def _fill_missing(frame: pd.DataFrame, column: str, value) -> pd.DataFrame:
     return frame
 
 
-def _ensure_dashboard_columns(frame: pd.DataFrame, payload: dict) -> pd.DataFrame:
-    """Quick runs have no OFAT param_id or level_label. Charts and filters need both."""
+def _ensure_dashboard_columns(
+    frame: pd.DataFrame,
+    payload: dict,
+    *,
+    missing_param_id: str = "quick_run",
+    missing_level_label: str | None = None,
+) -> pd.DataFrame:
+    """Charts and filters need param_id and level_label on every row.
+
+    Quick runs have neither, so they use quick_run and the scenario name.
+    A full-run main batch uses main_batch / baseline. OFAT rows already
+    carry the parameter id and level label.
+    """
     scenario = payload.get("scenario") or ""
     if "scenario" not in frame.columns:
         frame["scenario"] = scenario
     else:
         frame = _fill_missing(frame, "scenario", scenario)
     if "param_id" not in frame.columns:
-        frame["param_id"] = "quick_run"
+        frame["param_id"] = missing_param_id
     else:
-        frame = _fill_missing(frame, "param_id", "quick_run")
+        frame = _fill_missing(frame, "param_id", missing_param_id)
+    if missing_level_label is None:
+        fallback = frame["scenario"] if "scenario" in frame.columns else ""
+    else:
+        fallback = missing_level_label
     if "level_label" not in frame.columns:
-        frame["level_label"] = frame["scenario"] if "scenario" in frame.columns else ""
-    else:
+        frame["level_label"] = fallback
+    elif isinstance(fallback, pd.Series):
         missing = frame["level_label"].isna()
         if frame["level_label"].dtype == object:
             missing = missing | frame["level_label"].astype(str).str.strip().isin(["", "None", "nan"])
-        if "scenario" in frame.columns:
-            frame.loc[missing, "level_label"] = frame.loc[missing, "scenario"]
+        frame.loc[missing, "level_label"] = fallback.loc[missing]
         frame["level_label"] = frame["level_label"].fillna("")
+    else:
+        frame = _fill_missing(frame, "level_label", fallback)
     for column, value in (
         ("pd", payload.get("pd") or payload.get("mode")),
         ("controller", payload.get("controller") or "pd"),
@@ -167,24 +183,64 @@ def _from_parameter_sweeps(payload: dict) -> pd.DataFrame:
     return _ensure_dashboard_columns(pd.DataFrame(rows), payload)
 
 
-@st.cache_data(show_spinner="Reading JSON…")
 def load_data(filepath: str) -> pd.DataFrame:
     """Load episodes into one table.
 
     A quick report stores a flat list under the root key ``episodes``.
-    An older OFAT report stores outcomes under ``parameter_sweeps``.
+    An OFAT report stores outcomes under ``parameter_sweeps``.
+    A full report has both; they are stacked into one frame. The cache key
+    includes the file mtime so a new ``--mode full`` write is not skipped.
     """
     path = resolve_path(filepath)
+    stamp = path.stat().st_mtime_ns if path.is_file() else 0
+    return _load_data_cached(str(path), stamp)
+
+
+@st.cache_data(show_spinner="Reading JSON…")
+def _load_data_cached(filepath: str, _mtime_ns: int) -> pd.DataFrame:
+    path = Path(filepath)
     with path.open(encoding="utf-8") as handle:
         payload = json.load(handle)
     if not isinstance(payload, dict):
         payload = {}
 
+    has_sweeps = isinstance(payload.get("parameter_sweeps"), dict)
+    frames: list[pd.DataFrame] = []
     episodes = payload.get("episodes")
-    if isinstance(episodes, list):
-        frame = pd.DataFrame(episodes)
-        return _ensure_dashboard_columns(frame, payload)
-    return _from_parameter_sweeps(payload)
+    if isinstance(episodes, list) and episodes:
+        main = pd.DataFrame(episodes)
+        if has_sweeps:
+            main = _ensure_dashboard_columns(
+                main,
+                payload,
+                missing_param_id="main_batch",
+                missing_level_label="baseline",
+            )
+        else:
+            main = _ensure_dashboard_columns(main, payload)
+        frames.append(main)
+    if has_sweeps:
+        sweeps = _from_parameter_sweeps(payload)
+        if not sweeps.empty:
+            frames.append(sweeps)
+    if not frames:
+        return pd.DataFrame(columns=["param_id", "level_label", *OUTCOME_COLUMNS])
+    if len(frames) == 1:
+        return _order_columns(frames[0])
+    columns: list[str] = []
+    for part in frames:
+        for column in part.columns:
+            if column not in columns:
+                columns.append(column)
+    aligned: list[pd.DataFrame] = []
+    for part in frames:
+        missing = [column for column in columns if column not in part.columns]
+        if missing:
+            part = part.copy()
+            for column in missing:
+                part[column] = None
+        aligned.append(part)
+    return _order_columns(pd.concat(aligned, ignore_index=True))
 
 
 def apply_filters(
@@ -222,7 +278,7 @@ def failure_by_param(frame: pd.DataFrame) -> pd.DataFrame:
     return grouped.sort_values("failure_pct", ascending=True)
 
 
-def render_metrics(frame: pd.DataFrame) -> None:
+def render_metrics(frame: pd.DataFrame, note: str | None = None) -> None:
     total = int(len(frame))
     fails = int(frame["failed"].fillna(False).sum()) if total and "failed" in frame.columns else 0
     rate, interval = failure_rate_label(fails, total)
@@ -230,6 +286,8 @@ def render_metrics(frame: pd.DataFrame) -> None:
     episodes.metric("Episodes", f"{total}")
     fallen.metric("Failed", f"{fails}")
     rate_col.metric("Failure Rate", rate, delta=interval, delta_color="off")
+    if note:
+        st.caption(note)
 
 
 def render_param_chart(frame: pd.DataFrame) -> None:
@@ -409,10 +467,21 @@ def render_batch_tab() -> None:
         options=(FILTER_ALL, FILTER_FAILED, FILTER_SURVIVED),
     )
 
-    filtered = apply_filters(frame, selected_params, failed_mode)
-    render_metrics(filtered)
-    render_param_chart(filtered)
-    render_heatmap(filtered)
+    by_param = apply_filters(frame, selected_params, FILTER_ALL)
+    filtered = apply_filters(by_param, selected_params, failed_mode)
+    has_main = (
+        "param_id" in frame.columns
+        and bool((frame["param_id"].astype(str) == "main_batch").any())
+    )
+    if has_main:
+        render_metrics(
+            frame[frame["param_id"].astype(str) == "main_batch"],
+            note="Main batch",
+        )
+    else:
+        render_metrics(filtered)
+    render_param_chart(by_param)
+    render_heatmap(by_param)
     render_episode(filtered)
     st.caption(f"{len(filtered)} of {len(frame)} episodes")
     shown = _order_columns(filtered)
