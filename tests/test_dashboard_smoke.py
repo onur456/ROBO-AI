@@ -14,7 +14,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from dashboard.app import apply_filters, failure_heatmap, load_data
+from paired_compare import BETTER, NOISE, WORSE
+from dashboard.app import (
+    _verdict_color,
+    apply_filters,
+    comparison_table,
+    failure_heatmap,
+    load_data,
+)
 
 
 def _mini_batch() -> dict:
@@ -148,6 +155,50 @@ class DashboardSmokeTest(unittest.TestCase):
         self.assertIn("baseline 0 m", heat.columns)
         self.assertEqual(float(heat.loc["main_batch", "baseline"]), 50.0)
         self.assertEqual(float(heat.loc["com_x", "baseline 0 m"]), 50.0)
+
+    def test_comparison_table_formats_pvalues_and_verdict_colors(self) -> None:
+        table = comparison_table(
+            {
+                "rows": [
+                    {
+                        "scenario": "nominal",
+                        "param": "com_x",
+                        "label": "forward +0.03 m",
+                        "n_shared": 20,
+                        "n_0_to_1": 0,
+                        "n_1_to_0": 12,
+                        "delta_pp": -60.0,
+                        "p_mcnemar": 4e-15,
+                        "p_holm": 0.04523,
+                        "direction": BETTER,
+                    },
+                    {
+                        "param": "sensor_bias",
+                        "label": "bias +0.05 rad",
+                        "p_mcnemar": 0.04523,
+                        "p_holm": 0.2,
+                        "direction": WORSE,
+                    },
+                    {
+                        "param": "torque_limit",
+                        "label": "baseline 100% ctrlrange",
+                        "p_mcnemar": None,
+                        "p_holm": 1,
+                        "direction": NOISE,
+                    },
+                ]
+            }
+        )
+        self.assertEqual(table.loc[0, "p_mcnemar"], "< 0.001")
+        self.assertEqual(table.loc[0, "p_holm"], "0.0452")
+        self.assertEqual(table.loc[1, "p_mcnemar"], "0.0452")
+        self.assertEqual(table.loc[1, "p_holm"], "0.2000")
+        self.assertIsNone(table.loc[2, "p_mcnemar"])
+        self.assertEqual(table.loc[2, "p_holm"], "1.0000")
+        html = table.style.map(_verdict_color, subset=["Verdict"]).to_html()
+        self.assertIn("#3DDC97", html)
+        self.assertIn("#FF5C5C", html)
+        self.assertIn("#9AA0A6", html)
 
 
 if __name__ == "__main__":

@@ -493,6 +493,32 @@ def _load_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _format_pvalue(value):
+    """Short p-value: '< 0.001' under the cutoff, otherwise four decimals."""
+    if value is None:
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return value
+    if math.isnan(number):
+        return None
+    if number < 0.001:
+        return "< 0.001"
+    return f"{number:.4f}"
+
+
+def _verdict_color(value) -> str:
+    text = "" if value is None else str(value)
+    if text == DIRECTION_EN[BETTER]:
+        return "color: #3DDC97"
+    if text == DIRECTION_EN[WORSE]:
+        return "color: #FF5C5C"
+    if text == DIRECTION_EN[NOISE]:
+        return "color: #9AA0A6"
+    return ""
+
+
 def comparison_table(result: dict) -> pd.DataFrame:
     rows = []
     for row in result.get("rows") or []:
@@ -507,12 +533,34 @@ def comparison_table(result: dict) -> pd.DataFrame:
                 "worse_0_to_1": row.get("n_0_to_1"),
                 "better_1_to_0": row.get("n_1_to_0"),
                 "delta_pp": delta_txt,
-                "p_mcnemar": row.get("p_mcnemar"),
-                "p_holm": row.get("p_holm"),
+                "p_mcnemar": _format_pvalue(row.get("p_mcnemar")),
+                "p_holm": _format_pvalue(row.get("p_holm")),
                 "verdict": DIRECTION_EN.get(row.get("direction"), row.get("direction")),
             }
         )
-    return pd.DataFrame(rows).rename(
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "Scenario",
+                "Parameter",
+                "Level",
+                "Shared seeds",
+                "0->1 worse",
+                "1->0 better",
+                "Delta, pp",
+                "p_mcnemar",
+                "p_holm",
+                "Verdict",
+            ]
+        )
+    frame = pd.DataFrame(rows)
+    for column in ("p_mcnemar", "p_holm"):
+        cleaned = [
+            None if item is None or (isinstance(item, float) and math.isnan(item)) else item
+            for item in frame[column]
+        ]
+        frame[column] = pd.Series(cleaned, dtype=object, index=frame.index)
+    return frame.rename(
         columns={
             "scenario": "Scenario",
             "parameter": "Parameter",
@@ -564,7 +612,8 @@ def render_compare_tab() -> None:
     if table.empty:
         st.info("No comparable levels.")
         return
-    st.dataframe(table, use_container_width=True)
+    styled = table.style.map(_verdict_color, subset=["Verdict"])
+    st.dataframe(styled, use_container_width=True)
 
 
 def main() -> None:
