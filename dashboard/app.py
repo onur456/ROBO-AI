@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -42,7 +43,26 @@ BATCH_COLUMNS_EN = {
     "controller": "Controller",
     "kp": "kp",
     "kd": "kd",
+    "friction": "Friction",
+    "lateral_force": "Lateral force",
 }
+TABLE_FRONT = [
+    "param_id",
+    "level_label",
+    "episode",
+    "seed",
+    "failed",
+    "fail_fall",
+    "fail_stance_loss",
+    "fail_reason",
+    "friction",
+    "lateral_force",
+    "scenario",
+    "pd",
+    "controller",
+    "kp",
+    "kd",
+]
 
 OUTCOME_COLUMNS = [
     "episode",
@@ -69,19 +89,60 @@ def resolve_path(filepath: str) -> Path:
     return path
 
 
-@st.cache_data(show_spinner="Reading JSON…")
-def load_data(filepath: str) -> pd.DataFrame:
-    """Flatten outcomes from parameter_sweeps into one table.
+def _order_columns(frame: pd.DataFrame) -> pd.DataFrame:
+    front = [column for column in TABLE_FRONT if column in frame.columns]
+    rest = [column for column in frame.columns if column not in front]
+    return frame[front + rest]
 
-    Each row gets param_id (parameters[].id)
-    and level_label (levels[].label).
-    """
-    path = resolve_path(filepath)
-    with path.open(encoding="utf-8") as handle:
-        payload = json.load(handle)
 
+def _fill_missing(frame: pd.DataFrame, column: str, value) -> pd.DataFrame:
+    if column not in frame.columns:
+        frame[column] = value
+        return frame
+    missing = frame[column].isna()
+    if frame[column].dtype == object:
+        missing = missing | frame[column].astype(str).str.strip().isin(["", "None", "nan"])
+    if bool(missing.any()):
+        frame.loc[missing, column] = value
+    return frame
+
+
+def _ensure_dashboard_columns(frame: pd.DataFrame, payload: dict) -> pd.DataFrame:
+    """Quick runs have no OFAT param_id or level_label. Charts and filters need both."""
+    scenario = payload.get("scenario") or ""
+    if "scenario" not in frame.columns:
+        frame["scenario"] = scenario
+    else:
+        frame = _fill_missing(frame, "scenario", scenario)
+    if "param_id" not in frame.columns:
+        frame["param_id"] = "quick_run"
+    else:
+        frame = _fill_missing(frame, "param_id", "quick_run")
+    if "level_label" not in frame.columns:
+        frame["level_label"] = frame["scenario"] if "scenario" in frame.columns else ""
+    else:
+        missing = frame["level_label"].isna()
+        if frame["level_label"].dtype == object:
+            missing = missing | frame["level_label"].astype(str).str.strip().isin(["", "None", "nan"])
+        if "scenario" in frame.columns:
+            frame.loc[missing, "level_label"] = frame.loc[missing, "scenario"]
+        frame["level_label"] = frame["level_label"].fillna("")
+    for column, value in (
+        ("pd", payload.get("pd") or payload.get("mode")),
+        ("controller", payload.get("controller") or "pd"),
+        ("kp", payload.get("kp")),
+        ("kd", payload.get("kd")),
+    ):
+        if column not in frame.columns:
+            frame[column] = value
+    if "failed" not in frame.columns:
+        frame["failed"] = False
+    return _order_columns(frame)
+
+
+def _from_parameter_sweeps(payload: dict) -> pd.DataFrame:
     sweeps = payload.get("parameter_sweeps") or {}
-    scenario = sweeps.get("scenario")
+    scenario = sweeps.get("scenario") or payload.get("scenario")
     pd_name = payload.get("pd") or payload.get("mode")
     controller = payload.get("controller") or "pd"
     kp = payload.get("kp")
@@ -101,14 +162,29 @@ def load_data(filepath: str) -> pd.DataFrame:
                 row["kp"] = kp
                 row["kd"] = kd
                 rows.append(row)
-
     if not rows:
         return pd.DataFrame(columns=["param_id", "level_label", *OUTCOME_COLUMNS])
+    return _ensure_dashboard_columns(pd.DataFrame(rows), payload)
 
-    frame = pd.DataFrame(rows)
-    front = ["param_id", "level_label"]
-    rest = [column for column in frame.columns if column not in front]
-    return frame[front + rest]
+
+@st.cache_data(show_spinner="Reading JSON…")
+def load_data(filepath: str) -> pd.DataFrame:
+    """Load episodes into one table.
+
+    A quick report stores a flat list under the root key ``episodes``.
+    An older OFAT report stores outcomes under ``parameter_sweeps``.
+    """
+    path = resolve_path(filepath)
+    with path.open(encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, dict):
+        payload = {}
+
+    episodes = payload.get("episodes")
+    if isinstance(episodes, list):
+        frame = pd.DataFrame(episodes)
+        return _ensure_dashboard_columns(frame, payload)
+    return _from_parameter_sweeps(payload)
 
 
 def apply_filters(
@@ -116,7 +192,10 @@ def apply_filters(
     param_ids: list[str],
     failed_mode: str,
 ) -> pd.DataFrame:
-    filtered = frame[frame["param_id"].isin(param_ids)]
+    if "param_id" not in frame.columns:
+        frame = frame.copy()
+        frame["param_id"] = "quick_run"
+    filtered = frame[frame["param_id"].astype(str).isin([str(item) for item in param_ids])]
     if failed_mode == FILTER_FAILED:
         filtered = filtered[filtered["failed"] == True]  # noqa: E712
     elif failed_mode == FILTER_SURVIVED:
@@ -133,7 +212,7 @@ def failure_rate_label(fails: int, total: int) -> tuple[str, str]:
 
 
 def failure_by_param(frame: pd.DataFrame) -> pd.DataFrame:
-    if frame.empty:
+    if frame.empty or "param_id" not in frame.columns or "failed" not in frame.columns:
         return pd.DataFrame(columns=["param_id", "failure_pct"])
     grouped = frame.groupby("param_id", as_index=False).agg(
         n=("failed", "size"),
@@ -145,7 +224,7 @@ def failure_by_param(frame: pd.DataFrame) -> pd.DataFrame:
 
 def render_metrics(frame: pd.DataFrame) -> None:
     total = int(len(frame))
-    fails = int(frame["failed"].sum()) if total else 0
+    fails = int(frame["failed"].fillna(False).sum()) if total and "failed" in frame.columns else 0
     rate, interval = failure_rate_label(fails, total)
     episodes, fallen, rate_col = st.columns(3)
     episodes.metric("Episodes", f"{total}")
@@ -175,9 +254,13 @@ def render_param_chart(frame: pd.DataFrame) -> None:
 
 
 def failure_heatmap(frame: pd.DataFrame) -> pd.DataFrame:
-    if frame.empty:
+    if frame.empty or "param_id" not in frame.columns or "failed" not in frame.columns:
         return pd.DataFrame()
-    rates = frame.pivot_table(
+    plot_frame = frame
+    if "level_label" not in plot_frame.columns:
+        plot_frame = plot_frame.copy()
+        plot_frame["level_label"] = plot_frame["scenario"] if "scenario" in plot_frame.columns else ""
+    rates = plot_frame.pivot_table(
         index="param_id",
         columns="level_label",
         values="failed",
@@ -209,17 +292,32 @@ def render_heatmap(frame: pd.DataFrame) -> None:
 
 
 def _json_value(value):
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return None
-    if isinstance(value, str) and value == "":
+    """JSON-safe scalar. Lists and dicts are returned unchanged.
+
+    pd.isna on a list or a NumPy array raises ValueError because the result
+    is not a single true/false value.
+    """
+    if value is None or isinstance(value, (list, dict, tuple)):
         return value
-    try:
-        if pd.isna(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value):
             return None
-    except TypeError:
-        pass
+        return value
+    if hasattr(value, "shape") and getattr(value, "shape", ()) not in ((), None):
+        if hasattr(value, "tolist"):
+            return value.tolist()
+        return value
     if hasattr(value, "item"):
-        return value.item()
+        try:
+            return _json_value(value.item())
+        except (ValueError, TypeError):
+            return value
     return value
 
 
@@ -297,6 +395,9 @@ def render_batch_tab() -> None:
         return
 
     frame = load_data(filepath)
+    if "param_id" not in frame.columns:
+        frame = frame.copy()
+        frame["param_id"] = "quick_run"
     param_options = sorted(frame["param_id"].dropna().astype(str).unique())
     selected_params = st.sidebar.multiselect(
         "Parameters (param_id)",
@@ -314,7 +415,8 @@ def render_batch_tab() -> None:
     render_heatmap(filtered)
     render_episode(filtered)
     st.caption(f"{len(filtered)} of {len(frame)} episodes")
-    st.dataframe(filtered.rename(columns=BATCH_COLUMNS_EN), use_container_width=True)
+    shown = _order_columns(filtered)
+    st.dataframe(shown.rename(columns=BATCH_COLUMNS_EN), use_container_width=True)
 
 
 def _load_json(path: Path):
