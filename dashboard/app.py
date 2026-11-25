@@ -47,6 +47,11 @@ def load_data(filepath: str) -> pd.DataFrame:
         payload = json.load(handle)
 
     sweeps = payload.get("parameter_sweeps") or {}
+    scenario = sweeps.get("scenario")
+    pd_name = payload.get("pd") or payload.get("mode")
+    controller = payload.get("controller") or "pd"
+    kp = payload.get("kp")
+    kd = payload.get("kd")
     rows: list[dict] = []
     for param in sweeps.get("parameters") or []:
         param_id = param.get("id")
@@ -56,6 +61,11 @@ def load_data(filepath: str) -> pd.DataFrame:
                 row = dict(outcome)
                 row["param_id"] = param_id
                 row["level_label"] = level_label
+                row["scenario"] = scenario
+                row["pd"] = pd_name
+                row["controller"] = controller
+                row["kp"] = kp
+                row["kd"] = kd
                 rows.append(row)
 
     if not rows:
@@ -155,6 +165,87 @@ def render_heatmap(frame: pd.DataFrame) -> None:
     st.plotly_chart(figure, use_container_width=True)
 
 
+def _json_value(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, str) and value == "":
+        return value
+    try:
+        if pd.isna(value):
+            return None
+    except TypeError:
+        pass
+    if hasattr(value, "item"):
+        return value.item()
+    return value
+
+
+def episode_record(row: pd.Series) -> dict:
+    return {str(key): _json_value(value) for key, value in row.to_dict().items()}
+
+
+def episode_label(row: pd.Series) -> str:
+    reason = "ok" if pd.isna(row.get("fail_reason")) else str(row["fail_reason"])
+    state = "fail" if bool(row["failed"]) else "ok"
+    return (
+        f"{int(row['seed'])} · {row['param_id']} · {row['level_label']} · "
+        f"ep {int(row['episode'])} · {state} · {reason}"
+    )
+
+
+def reproduce_command(row: pd.Series) -> str:
+    """Команда из флагов, которые argparse в step3 реально принимает.
+
+    Отдельного --seed нет: seed эпизода = 42 * 1000003 + номер эпизода,
+    а номер попадает в прогон через --episodes.
+    """
+    scenario = row.get("scenario") or "nominal"
+    pd_name = row.get("pd") or "baseline"
+    controller = row.get("controller") or "pd"
+    episode = int(row["episode"])
+    seed = int(row["seed"])
+    report = f"reports/repro_seed_{seed}_{row['param_id']}.json"
+    return (
+        "python step3_batch_stress.py "
+        f"--mode ofat --scenario {scenario} --pd {pd_name} "
+        f"--controller {controller} --episodes {episode} "
+        f"--report {report}"
+    )
+
+
+def render_episode(frame: pd.DataFrame) -> None:
+    st.subheader("Воспроизведение эпизода")
+    if frame.empty:
+        st.info("В текущем фильтре нет эпизодов.")
+        return
+
+    labels = [episode_label(row) for _, row in frame.iterrows()]
+    choice = st.selectbox(
+        "Эпизод, поиск по seed",
+        options=labels,
+        index=0,
+        help="Список можно фильтровать вводом seed, параметра или уровня.",
+    )
+    row = frame.iloc[labels.index(choice)]
+    record = episode_record(row)
+    st.json(record)
+    command = reproduce_command(row)
+    st.code(command, language="bash")
+    st.caption(
+        "В step3 нет флага --seed. Этот seed получается из номера эпизода. "
+        "--episodes задаёт прогон 1..N и включает выбранный номер. "
+        "Режим ofat для nominal дополнительно считает moderate. "
+        "--report пишет результат в отдельный файл и не трогает batch_failures.json."
+    )
+    file_name = f"episode_{int(row['seed'])}_{row['param_id']}.json"
+    st.download_button(
+        "Скачать JSON эпизода",
+        data=json.dumps(record, ensure_ascii=False, indent=2),
+        file_name=file_name,
+        mime="application/json",
+    )
+
+
 def main() -> None:
     st.set_page_config(page_title="Robo AI — Stress Test Dashboard", layout="wide")
     st.title("Robo AI — Stress Test Dashboard")
@@ -181,6 +272,7 @@ def main() -> None:
     render_metrics(filtered)
     render_param_chart(filtered)
     render_heatmap(filtered)
+    render_episode(filtered)
     st.caption(f"{len(filtered)} из {len(frame)} эпизодов")
     st.dataframe(filtered, use_container_width=True)
 
