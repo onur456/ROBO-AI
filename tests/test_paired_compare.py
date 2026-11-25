@@ -1,4 +1,4 @@
-"""Парное сравнение прогонов по seed: порядок, Макнемар, Холм, неполное пересечение."""
+"""Paired run comparison by seed: order, McNemar, Holm, partial overlap."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ class PairedCompareTest(unittest.TestCase):
         self.assertEqual(a["warnings"], [])
 
     def test_discordant_mcnemar_and_holm(self) -> None:
-        # Уровень shift: два 1->0 и один 0->1. Уровень flat: все пары согласованы.
+        # Shift level: two 1->0 and one 0->1. Flat level: every pair agrees.
         shift_a = _rows([(i, i <= 4) for i in range(1, 9)])
         shift_b = _rows(
             [
@@ -149,13 +149,13 @@ class PairedCompareTest(unittest.TestCase):
         self.assertEqual(row["n_1_to_0"], 0)
         self.assertEqual(row["p_mcnemar"], 1.0)
         self.assertEqual(row["direction"], NOISE)
-        self.assertTrue(any("только в A" in note for note in row["warnings"]))
+        self.assertTrue(any("only in A" in note for note in row["warnings"]))
         lo, hi = row["before"]["ci95"]
         self.assertGreaterEqual(lo, 0.0)
         self.assertLessEqual(hi, 1.0)
         empty = compare_runs(_run(_rows([(1, False)])), _run(_rows([(2, True)])))
         self.assertEqual(empty["rows"][0]["n_shared"], 0)
-        self.assertEqual(empty["rows"][0]["direction"], "нет общих seed")
+        self.assertEqual(empty["rows"][0]["direction"], "no shared seeds")
         self.assertEqual(empty["n_tests"], 0)
         self.assertEqual(empty["strongest"], [])
 
@@ -194,7 +194,7 @@ class PairedCompareTest(unittest.TestCase):
 
     def test_heading_names_controller_and_z_ref_mismatch(self) -> None:
         heading = s3.main_batch_heading("stance_shift", "baseline", 40, 3)
-        self.assertIn("контроллер stance_shift", heading)
+        self.assertIn("controller stance_shift", heading)
         self.assertIn("PD baseline", heading)
         self.assertIn("kp=40", heading)
         self.assertIn("kd=3", heading)
@@ -232,8 +232,8 @@ class PairedCompareTest(unittest.TestCase):
         self.assertEqual(result["after_meta"]["controller"], "stance_shift")
         self.assertAlmostEqual(result["before_meta"]["z_ref"], 0.2441)
         self.assertAlmostEqual(result["after_meta"]["z_ref"], 0.2702)
-        self.assertTrue(any("z_ref различается" in note for note in result["warnings"]))
-        self.assertFalse(any("порог stance_loss по z" in note for note in result["warnings"]))
+        self.assertTrue(any("z_ref differs" in note for note in result["warnings"]))
+        self.assertFalse(any("stance_loss z threshold" in note for note in result["warnings"]))
 
 
 if __name__ == "__main__":

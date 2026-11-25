@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -15,10 +16,34 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from paired_compare import compare_runs
+from paired_compare import BETTER, NO_PAIR, NOISE, WORSE, compare_runs
 from step3_batch_stress import wilson_ci
 
 DEFAULT_PATH = "reports/batch_failures.json"
+FILTER_ALL = "All"
+FILTER_FAILED = "Failed only"
+FILTER_SURVIVED = "Survived only"
+DIRECTION_EN = {
+    WORSE: "Significant increase in failures",
+    BETTER: "Significant decrease in failures",
+    NOISE: "Within noise",
+    NO_PAIR: "No shared seeds",
+}
+BATCH_COLUMNS_EN = {
+    "param_id": "Parameter",
+    "level_label": "Level",
+    "episode": "Episode",
+    "seed": "Seed",
+    "failed": "Failed",
+    "fail_fall": "Fall",
+    "fail_stance_loss": "Stance loss",
+    "fail_reason": "Failure reason",
+    "scenario": "Scenario",
+    "pd": "PD mode",
+    "controller": "Controller",
+    "kp": "kp",
+    "kd": "kd",
+}
 
 OUTCOME_COLUMNS = [
     "episode",
@@ -45,7 +70,7 @@ def resolve_path(filepath: str) -> Path:
     return path
 
 
-@st.cache_data(show_spinner="Читаю JSON…")
+@st.cache_data(show_spinner="Reading JSON…")
 def load_data(filepath: str) -> pd.DataFrame:
     """Собрать outcomes из parameter_sweeps в одну таблицу.
 
@@ -93,16 +118,16 @@ def apply_filters(
     failed_mode: str,
 ) -> pd.DataFrame:
     filtered = frame[frame["param_id"].isin(param_ids)]
-    if failed_mode == "Только упавшие":
+    if failed_mode == FILTER_FAILED:
         filtered = filtered[filtered["failed"] == True]  # noqa: E712
-    elif failed_mode == "Только выжившие":
+    elif failed_mode == FILTER_SURVIVED:
         filtered = filtered[filtered["failed"] == False]  # noqa: E712
     return filtered
 
 
 def failure_rate_label(fails: int, total: int) -> tuple[str, str]:
     if total <= 0:
-        return "—", "нет"
+        return "—", "n/a"
     lo, hi = wilson_ci(fails, total)
     rate = 100.0 * fails / total
     return f"{rate:.1f}%", f"[{lo * 100:.1f}%, {hi * 100:.1f}%]"
@@ -124,24 +149,29 @@ def render_metrics(frame: pd.DataFrame) -> None:
     fails = int(frame["failed"].sum()) if total else 0
     rate, interval = failure_rate_label(fails, total)
     episodes, fallen, rate_col = st.columns(3)
-    episodes.metric("Эпизоды", f"{total}")
-    fallen.metric("Упавшие", f"{fails}")
+    episodes.metric("Episodes", f"{total}")
+    fallen.metric("Failed", f"{fails}")
     rate_col.metric("Failure Rate", rate, delta=interval, delta_color="off")
 
 
 def render_param_chart(frame: pd.DataFrame) -> None:
     summary = failure_by_param(frame)
     if summary.empty:
-        st.info("Нет строк для графика.")
+        st.info("No rows to plot.")
         return
     figure = px.bar(
         summary,
         x="failure_pct",
         y="param_id",
         orientation="h",
-        labels={"failure_pct": "Доля падений, %", "param_id": "Параметр"},
+        labels={"failure_pct": "Failure Rate, %", "param_id": "Parameter"},
     )
-    figure.update_layout(margin=dict(l=0, r=0, t=10, b=0), yaxis={"categoryorder": "total ascending"})
+    figure.update_layout(
+        margin=dict(l=0, r=0, t=10, b=0),
+        xaxis_title="Failure Rate, %",
+        yaxis_title="Parameter",
+        yaxis={"categoryorder": "total ascending"},
+    )
     st.plotly_chart(figure, use_container_width=True)
 
 
@@ -158,10 +188,10 @@ def failure_heatmap(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_heatmap(frame: pd.DataFrame) -> None:
-    st.subheader("Тепловая карта падений по уровням параметров")
+    st.subheader("Failure heatmap by parameter level")
     table = failure_heatmap(frame)
     if table.empty:
-        st.info("Нет строк для тепловой карты.")
+        st.info("No rows for the heatmap.")
         return
     figure = px.imshow(
         table,
@@ -169,9 +199,13 @@ def render_heatmap(frame: pd.DataFrame) -> None:
         zmin=0,
         zmax=100,
         aspect="auto",
-        labels={"color": "Доля падений, %", "x": "Уровень", "y": "Параметр"},
+        labels={"color": "Failure Rate, %", "x": "Level", "y": "Parameter"},
     )
-    figure.update_layout(margin=dict(l=0, r=0, t=10, b=0))
+    figure.update_layout(
+        margin=dict(l=0, r=0, t=10, b=0),
+        xaxis_title="Level",
+        yaxis_title="Parameter",
+    )
     st.plotly_chart(figure, use_container_width=True)
 
 
@@ -224,17 +258,17 @@ def reproduce_command(row: pd.Series) -> str:
 
 
 def render_episode(frame: pd.DataFrame) -> None:
-    st.subheader("Воспроизведение эпизода")
+    st.subheader("Reproduce episode")
     if frame.empty:
-        st.info("В текущем фильтре нет эпизодов.")
+        st.info("No episodes match the current filter.")
         return
 
     labels = [episode_label(row) for _, row in frame.iterrows()]
     choice = st.selectbox(
-        "Эпизод, поиск по seed",
+        "Episode, search by seed",
         options=labels,
         index=0,
-        help="Список можно фильтровать вводом seed, параметра или уровня.",
+        help="Type a seed, parameter, or level to filter the list.",
     )
     row = frame.iloc[labels.index(choice)]
     record = episode_record(row)
@@ -242,14 +276,14 @@ def render_episode(frame: pd.DataFrame) -> None:
     command = reproduce_command(row)
     st.code(command, language="bash")
     st.caption(
-        "В step3 нет флага --seed. Этот seed получается из номера эпизода. "
-        "--episodes задаёт прогон 1..N и включает выбранный номер. "
-        "Режим ofat для nominal дополнительно считает moderate. "
-        "--report пишет результат в отдельный файл и не трогает batch_failures.json."
+        "step3 has no --seed flag. This seed comes from the episode number. "
+        "--episodes runs episodes 1..N and includes the selected number. "
+        "ofat on nominal also runs moderate. "
+        "--report writes a separate file and does not touch batch_failures.json."
     )
     file_name = f"episode_{int(row['seed'])}_{row['param_id']}.json"
     st.download_button(
-        "Скачать JSON эпизода",
+        "Download episode JSON",
         data=json.dumps(record, ensure_ascii=False, indent=2),
         file_name=file_name,
         mime="application/json",
@@ -257,22 +291,22 @@ def render_episode(frame: pd.DataFrame) -> None:
 
 
 def render_batch_tab() -> None:
-    filepath = st.sidebar.text_input("Путь к JSON", value=cli_report_path())
+    filepath = st.sidebar.text_input("JSON path", value=cli_report_path())
     path = resolve_path(filepath)
     if not path.is_file():
-        st.error(f"Файл не найден: {path}")
+        st.error(f"File not found: {path}")
         return
 
     frame = load_data(filepath)
     param_options = sorted(frame["param_id"].dropna().astype(str).unique())
     selected_params = st.sidebar.multiselect(
-        "Параметры (param_id)",
+        "Parameters (param_id)",
         options=param_options,
         default=param_options,
     )
     failed_mode = st.sidebar.selectbox(
-        "Сбой (failed)",
-        options=("Все", "Только упавшие", "Только выжившие"),
+        "Outcome (failed)",
+        options=(FILTER_ALL, FILTER_FAILED, FILTER_SURVIVED),
     )
 
     filtered = apply_filters(frame, selected_params, failed_mode)
@@ -280,8 +314,8 @@ def render_batch_tab() -> None:
     render_param_chart(filtered)
     render_heatmap(filtered)
     render_episode(filtered)
-    st.caption(f"{len(filtered)} из {len(frame)} эпизодов")
-    st.dataframe(filtered, use_container_width=True)
+    st.caption(f"{len(filtered)} of {len(frame)} episodes")
+    st.dataframe(filtered.rename(columns=BATCH_COLUMNS_EN), use_container_width=True)
 
 
 def _load_json(path: Path):
@@ -295,39 +329,90 @@ def comparison_table(result: dict) -> pd.DataFrame:
         delta_txt = None if delta is None or delta != delta else round(float(delta), 1)
         rows.append(
             {
-                "сценарий": row.get("scenario"),
-                "параметр": row.get("param"),
-                "уровень": row.get("label") or row.get("level"),
-                "общие seed": row.get("n_shared"),
-                "0->1 хуже": row.get("n_0_to_1"),
-                "1->0 лучше": row.get("n_1_to_0"),
-                "Δ, п.п.": delta_txt,
+                "scenario": row.get("scenario"),
+                "parameter": row.get("param"),
+                "level": row.get("label") or row.get("level"),
+                "shared_seeds": row.get("n_shared"),
+                "worse_0_to_1": row.get("n_0_to_1"),
+                "better_1_to_0": row.get("n_1_to_0"),
+                "delta_pp": delta_txt,
                 "p_mcnemar": row.get("p_mcnemar"),
                 "p_holm": row.get("p_holm"),
-                "вердикт": row.get("direction"),
+                "verdict": DIRECTION_EN.get(row.get("direction"), row.get("direction")),
             }
         )
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows).rename(
+        columns={
+            "scenario": "Scenario",
+            "parameter": "Parameter",
+            "level": "Level",
+            "shared_seeds": "Shared seeds",
+            "worse_0_to_1": "0->1 worse",
+            "better_1_to_0": "1->0 better",
+            "delta_pp": "Delta, pp",
+            "p_mcnemar": "p_mcnemar",
+            "p_holm": "p_holm",
+            "verdict": "Verdict",
+        }
+    )
+
+
+def display_warning(note: str) -> str:
+    """Show paired_compare warnings in English. The numbers stay as computed."""
+    rules = (
+        (
+            r"seed не совпали полностью: только в A (\d+), только в B (\d+)",
+            r"Seeds do not fully overlap: only in A \1, only in B \2",
+        ),
+        (
+            r"повторные seed внутри прогона пропущены \(A (\d+), B (\d+)\)",
+            r"Duplicate seeds inside a run were skipped (A \1, B \2)",
+        ),
+        (
+            r"строки без seed пропущены \(A (\d+), B (\d+)\)",
+            r"Rows without a seed were skipped (A \1, B \2)",
+        ),
+        (
+            r"уровни без пары: только в A (\d+), только в B (\d+)",
+            r"Levels without a pair: only in A \1, only in B \2",
+        ),
+        (
+            r"z_ref различается: A ([0-9.]+) м, B ([0-9.]+) м",
+            r"z_ref differs: A \1 m, B \2 m",
+        ),
+        (
+            r"порог stance_loss по z различается: A z<([0-9.]+) м, B z<([0-9.]+) м",
+            r"stance_loss z threshold differs: A z<\1 m, B z<\2 m",
+        ),
+        (
+            r"порог stance_loss по slip различается: A slip>([0-9.]+) м, B slip>([0-9.]+) м",
+            r"stance_loss slip threshold differs: A slip>\1 m, B slip>\2 m",
+        ),
+    )
+    text = note
+    for pattern, replacement in rules:
+        text = re.sub(pattern, replacement, text)
+    return text
 
 
 def render_compare_tab() -> None:
-    st.subheader("Сравнение A/B")
-    path_a = st.text_input("Файл А (До)", value="", key="compare_a")
-    path_b = st.text_input("Файл Б (После)", value="", key="compare_b")
+    st.subheader("A/B comparison")
+    path_a = st.text_input("File A (before)", value="", key="compare_a")
+    path_b = st.text_input("File B (after)", value="", key="compare_b")
     if not path_a.strip() or not path_b.strip():
-        st.info("Укажите пути к двум JSON: файл А (до) и файл Б (после).")
+        st.info("Enter both JSON paths: file A (before) and file B (after).")
         return
 
     file_a = resolve_path(path_a.strip())
     file_b = resolve_path(path_b.strip())
     missing = [str(path) for path in (file_a, file_b) if not path.is_file()]
     if missing:
-        st.error("Файл не найден: " + "; ".join(missing))
+        st.error("File not found: " + "; ".join(missing))
         return
     try:
         result = compare_runs(_load_json(file_a), _load_json(file_b))
     except (OSError, json.JSONDecodeError, ValueError) as exc:
-        st.error(f"Не удалось сравнить файлы: {exc}")
+        st.error(f"Could not compare the files: {exc}")
         return
 
     shown: list[str] = []
@@ -335,11 +420,11 @@ def render_compare_tab() -> None:
         if note in shown:
             continue
         shown.append(note)
-        st.warning(note)
+        st.warning(display_warning(note))
 
     table = comparison_table(result)
     if table.empty:
-        st.info("Сопоставимых уровней нет.")
+        st.info("No comparable levels.")
         return
     st.dataframe(table, use_container_width=True)
 
@@ -347,7 +432,7 @@ def render_compare_tab() -> None:
 def main() -> None:
     st.set_page_config(page_title="Robo AI — Stress Test Dashboard", layout="wide")
     st.title("Robo AI — Stress Test Dashboard")
-    tab_batch, tab_compare = st.tabs(["Анализ батча", "Сравнение A/B"])
+    tab_batch, tab_compare = st.tabs(["Batch Analysis", "A/B Comparison"])
     with tab_batch:
         render_batch_tab()
     with tab_compare:

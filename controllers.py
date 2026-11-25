@@ -96,7 +96,7 @@ class CallableController:
             return self.fn(obs, step, dt, target_qpos)
         except TypeError as exc:
             raise TypeError(
-                f"функция контроллера {self.name!r} не вызвалась как "
+                f"controller function {self.name!r} was not called as "
                 f"compute(obs, step, dt, target_qpos): {exc}"
             ) from exc
 
@@ -105,28 +105,28 @@ def _spec_parts(spec: str) -> tuple[str, str | None]:
     text = str(spec).strip()
     if not text:
         raise ValueError(
-            "пустой спецификатор контроллера: ожидается pd, stance_shift, "
-            "путь.py:Имя или модуль:Имя"
+            "empty controller spec: expected pd, stance_shift, "
+            "path.py:Name, or module:Name"
         )
     if text in CONTROLLER_NAMES:
         return text, None
     if ":" not in text:
         known = ", ".join(CONTROLLER_NAMES)
         raise ValueError(
-            f"некорректный спецификатор контроллера {text!r}: нет ':'. "
-            f"Ожидается {known}, путь.py:КлассИлиФункция или модуль:Атрибут"
+            f"invalid controller spec {text!r}: missing ':'. "
+            f"Expected {known}, path.py:ClassOrFunction, or module:Attr"
         )
     location, attr = text.rsplit(":", 1)
     location = location.strip().strip('"').strip("'")
     attr = attr.strip()
     if not location or not attr:
         raise ValueError(
-            f"некорректный спецификатор контроллера {text!r}: "
-            "нужны и расположение, и имя атрибута (например file.py:MyController)"
+            f"invalid controller spec {text!r}: "
+            "both a location and an attribute name are required (for example file.py:MyController)"
         )
     if not attr.isidentifier():
         raise ValueError(
-            f"некорректное имя атрибута контроллера {attr!r} в спецификаторе {text!r}"
+            f"invalid controller attribute name {attr!r} in spec {text!r}"
         )
     return location, attr
 
@@ -148,8 +148,8 @@ def canonical_controller_spec(spec: str) -> str:
             path = Path.cwd() / path
         if not path.is_file():
             raise ValueError(
-                f"файл контроллера не найден: {path} "
-                f"(спецификатор {location}:{attr})"
+                f"controller file not found: {path} "
+                f"(spec {location}:{attr})"
             )
         return f"{path.resolve()}:{attr}"
     return f"{location}:{attr}"
@@ -167,14 +167,14 @@ def locate_module_root(module_name: str) -> str:
         found = importlib.util.find_spec(module_name)
     except ModuleNotFoundError as exc:
         raise ValueError(
-            f"модуль контроллера не найден: {module_name!r} ({exc}). "
-            "Добавьте каталог модуля в sys.path или укажите путь.py:Имя"
+            f"controller module not found: {module_name!r} ({exc}). "
+            "Add the module directory to sys.path or pass path.py:Name"
         ) from exc
     origin = None if found is None else getattr(found, "origin", None)
     if found is None or not origin or origin == "namespace":
         raise ValueError(
-            f"модуль контроллера не найден: {module_name!r}. "
-            "Добавьте каталог модуля в sys.path или укажите путь.py:Имя"
+            f"controller module not found: {module_name!r}. "
+            "Add the module directory to sys.path or pass path.py:Name"
         )
     origin_path = Path(origin).resolve()
     matches: list[str] = []
@@ -219,7 +219,7 @@ def prepare_controller_spec(spec: str) -> tuple[str, str | None]:
     apply_import_root(root)
     module = importlib.import_module(location)
     if not hasattr(module, attr):
-        raise ValueError(f"в модуле {location!r} нет атрибута {attr!r}")
+        raise ValueError(f"module {location!r} has no attribute {attr!r}")
     return canonical, root
 
 
@@ -228,8 +228,8 @@ def _load_attribute(location: str, attr: str):
         path = Path(location).expanduser()
         if not path.is_file():
             raise ValueError(
-                f"файл контроллера не найден: {path} "
-                f"(спецификатор {location}:{attr})"
+                f"controller file not found: {path} "
+                f"(spec {location}:{attr})"
             )
         resolved = path.resolve()
         mtime = int(resolved.stat().st_mtime_ns)
@@ -240,18 +240,18 @@ def _load_attribute(location: str, attr: str):
         module_name = f"external_controller_{abs(hash(key))}"
         loaded = importlib.util.spec_from_file_location(module_name, resolved)
         if loaded is None or loaded.loader is None:
-            raise ValueError(f"не удалось прочитать файл контроллера: {resolved}")
+            raise ValueError(f"could not read controller file: {resolved}")
         module = importlib.util.module_from_spec(loaded)
         try:
             loaded.loader.exec_module(module)
         except Exception as exc:
             raise ValueError(
-                f"не удалось загрузить файл контроллера {resolved}: "
+                f"could not load controller file {resolved}: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
         if not hasattr(module, attr):
             raise ValueError(
-                f"в файле {resolved} нет атрибута {attr!r}"
+                f"file {resolved} has no attribute {attr!r}"
             )
         obj = getattr(module, attr)
         _ATTR_CACHE[key] = obj
@@ -265,16 +265,16 @@ def _load_attribute(location: str, attr: str):
         module = importlib.import_module(location)
     except ModuleNotFoundError as exc:
         raise ValueError(
-            f"модуль контроллера не найден: {location!r} ({exc}). "
-            "Для файла укажите путь.py:Имя"
+            f"controller module not found: {location!r} ({exc}). "
+            "For a file, pass path.py:Name"
         ) from exc
     except Exception as exc:
         raise ValueError(
-            f"не удалось импортировать модуль контроллера {location!r}: "
+            f"could not import controller module {location!r}: "
             f"{type(exc).__name__}: {exc}"
         ) from exc
     if not hasattr(module, attr):
-        raise ValueError(f"в модуле {location!r} нет атрибута {attr!r}")
+        raise ValueError(f"module {location!r} has no attribute {attr!r}")
     obj = getattr(module, attr)
     _ATTR_CACHE[key] = obj
     return obj
@@ -326,8 +326,8 @@ def _call_with_gains(fn, kp: float, kd: float, label: str):
     unknown = [name for name in required if name not in {"kp", "kd"}]
     if unknown:
         raise ValueError(
-            f"контроллер {label} нельзя создать: обязательные аргументы {unknown}. "
-            "Класс или фабрика могут принимать только kp и kd"
+            f"cannot construct controller {label}: required arguments {unknown}. "
+            "A class or factory may accept only kp and kd"
         )
     kwargs = {}
     if "kp" in names:
@@ -345,12 +345,12 @@ def _build_external(obj, kp: float, kd: float, label: str):
             raise
         except Exception as exc:
             raise ValueError(
-                f"не удалось создать класс контроллера {label}: "
+                f"could not construct controller class {label}: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
         if not callable(getattr(inst, "act", None)):
             raise ValueError(
-                f"класс {label} создан, но у экземпляра нет метода "
+                f"class {label} was constructed, but the instance has no method "
                 "act(obs, step, dt, target_qpos)"
             )
         if not getattr(inst, "name", None):
@@ -365,7 +365,7 @@ def _build_external(obj, kp: float, kd: float, label: str):
             raise
         except Exception as exc:
             raise ValueError(
-                f"фабрика контроллера {label} не вернула объект: "
+                f"controller factory {label} did not return an object: "
                 f"{type(exc).__name__}: {exc}"
             ) from exc
         if callable(getattr(produced, "act", None)):
@@ -376,15 +376,15 @@ def _build_external(obj, kp: float, kd: float, label: str):
                     pass
             return produced
         raise ValueError(
-            f"атрибут {label} — функция, но это не compute(obs, step, dt, target_qpos) "
-            "и не фабрика, возвращающая объект с методом act"
+            f"attribute {label} is a function, but it is not compute(obs, step, dt, target_qpos) "
+            "and not a factory that returns an object with an act method"
         )
     if callable(getattr(obj, "act", None)):
         return obj
     raise ValueError(
-        f"атрибут {label} нельзя использовать как контроллер: "
-        "нужен класс с act, функция compute(obs, step, dt, target_qpos) "
-        "или фабрика (kp, kd)"
+        f"attribute {label} cannot be used as a controller: "
+        "need a class with act, a compute(obs, step, dt, target_qpos) function, "
+        "or a factory (kp, kd)"
     )
 
 
@@ -397,7 +397,7 @@ def make_controller(name: str, kp: float, kd: float):
     location, attr = _spec_parts(spec)
     if attr is None:
         known = ", ".join(CONTROLLER_NAMES)
-        raise ValueError(f"неизвестный контроллер: {spec!r} (ожидается {known})")
+        raise ValueError(f"unknown controller: {spec!r} (expected {known})")
     if not _looks_like_file(location):
         apply_import_root(CONTROLLER_IMPORT_ROOT)
     obj = _load_attribute(location, attr)

@@ -19,17 +19,17 @@ SLIP_FRICTION_THRESHOLD = 0.15
 DEFAULT_IMPULSE_START = 450
 DEFAULT_IMPULSE_END = 500
 
-CAT_OVERTURN = "Опрокидывание от бокового импульса"
-CAT_SLIP = "Разъезжание лап на скользкой поверхности"
-CAT_OTHER = "Прочее / смешанный сбой"
+CAT_OVERTURN = "Tip-over from a lateral impulse"
+CAT_SLIP = "Feet spreading on a slippery surface"
+CAT_OTHER = "Other / mixed failure"
 
 PHASE_BEFORE = "before_impact"
 PHASE_DURING = "during_impact"
 PHASE_AFTER = "after_impact"
 PHASE_LABELS = {
-    PHASE_BEFORE: "до удара (ещё до включения Fy)",
-    PHASE_DURING: "во время удара (шаги 450..500)",
-    PHASE_AFTER: "после удара",
+    PHASE_BEFORE: "before impact (before Fy turns on)",
+    PHASE_DURING: "during impact (steps 450..500)",
+    PHASE_AFTER: "after impact",
 }
 
 
@@ -107,32 +107,25 @@ def impact_phase_of(fail_step: int, start: int, end: int, stored: object = None)
 
 
 def _steps_word(n: int) -> str:
-    count = abs(int(n))
-    mod10 = count % 10
-    mod100 = count % 100
-    if mod10 == 1 and mod100 != 11:
-        return "шаг"
-    if 2 <= mod10 <= 4 and not 12 <= mod100 <= 14:
-        return "шага"
-    return "шагов"
+    return "step" if abs(int(n)) == 1 else "steps"
 
 
 def fail_vs_impulse(fail_step: int, start: int, end: int) -> str:
     if fail_step < start:
         delta = start - fail_step
-        return f"до удара ({delta} {_steps_word(delta)} до начала {start}..{end})"
+        return f"before impact ({delta} {_steps_word(delta)} before the start of {start}..{end})"
     if fail_step <= end:
         delta = fail_step - start
-        return f"во время удара (+{delta} {_steps_word(delta)} от начала {start}..{end})"
+        return f"during impact (+{delta} {_steps_word(delta)} from the start of {start}..{end})"
     delta = fail_step - end
-    return f"после удара (+{delta} {_steps_word(delta)} после конца {start}..{end})"
+    return f"after impact (+{delta} {_steps_word(delta)} after the end of {start}..{end})"
 
 
 def format_push(ep: dict) -> str:
     value = _as_float(ep.get("lateral_force"))
     if ep.get("push_is_force"):
-        return f"{value:+.1f} Н"
-    return f"{value:+.3f} м/с"
+        return f"{value:+.1f} N"
+    return f"{value:+.3f} m/s"
 
 
 def classify_failure(friction: float, max_abs_roll_rate: float) -> str:
@@ -234,7 +227,7 @@ def phase_stats(episodes: list[dict]) -> list[tuple[str, str, int, float]]:
 
 
 def mixed_comment(ep: dict) -> str:
-    """Пояснение без изменения правил классификации: что выглядит преобладающим."""
+    """Comment on what looks dominant, without changing the classification rules."""
     roll = _as_float(ep.get("max_abs_roll_rate"))
     friction = _as_float(ep.get("friction"))
     force = abs(_as_float(ep.get("lateral_force")))
@@ -249,16 +242,16 @@ def mixed_comment(ep: dict) -> str:
     sag_like = friction < 0.40 and roll <= 1.2 and (before or z_drop >= 0.03 or speed < 0.35)
     if sag_like and not near_overturn:
         return (
-            "Преобладает низкое или среднее трение с просадкой корпуса "
-            "(крен слабый, это ближе к разъезжанию, но μ ≥ 0.15, поэтому нет отдельной категории)."
+            "Low or medium friction with a torso drop dominates "
+            "(roll is weak, closer to feet spreading, but mu >= 0.15, so there is no separate category)."
         )
     if near_overturn:
         return (
-            "Преобладает боковая сила/крен "
-            "(почти опрокидывание, но |qvel[3]| не превысил порог 2.5 рад/с)."
+            "Lateral force/roll dominates "
+            "(close to a tip-over, but |qvel[3]| did not pass 2.5 rad/s)."
         )
     return (
-        "Смешаны боковой импульс и просадка на среднем трении, явного лидера нет."
+        "Lateral impulse and sag at medium friction are mixed; there is no clear leader."
     )
 
 
@@ -267,24 +260,24 @@ def explain_example(ep: dict) -> str:
     timing = ep.get("fail_vs_impulse", "")
     if ep["category"] == CAT_OVERTURN:
         return (
-            f"Сильный боковой импульс ({push}) раскрутил корпус: "
-            f"макс. |qvel[3]| = {ep['max_abs_roll_rate']:.2f} рад/с (> {ROLL_RATE_THRESHOLD}). "
-            f"Сбой {timing}. "
-            "Суставной PD держит стойку ног, но не гасит крен, поэтому робот опрокидывается."
+            f"A strong lateral impulse ({push}) spun the torso: "
+            f"max |qvel[3]| = {ep['max_abs_roll_rate']:.2f} rad/s (> {ROLL_RATE_THRESHOLD}). "
+            f"Failure {timing}. "
+            "Joint PD holds the leg stance but does not reject roll, so the robot tips over."
         )
     if ep["category"] == CAT_SLIP:
         return (
-            f"Трение пола низкое ({ep['friction']:.3f} < {SLIP_FRICTION_THRESHOLD}), "
-            f"крен умеренный (|qvel[3]| = {ep['max_abs_roll_rate']:.2f} рад/с). "
-            f"Сбой {timing}. "
-            "Опоры проскальзывают, ноги разъезжаются, и высота корпуса падает без резкого опрокидывания."
+            f"Floor friction is low ({ep['friction']:.3f} < {SLIP_FRICTION_THRESHOLD}), "
+            f"roll is moderate (|qvel[3]| = {ep['max_abs_roll_rate']:.2f} rad/s). "
+            f"Failure {timing}. "
+            "The feet slip, the legs spread, and torso height drops without a sharp tip-over."
         )
     return (
-        f"Смешанный случай: friction={ep['friction']:.3f}, "
-        f"толчок {push}, "
-        f"|qvel[3]|={ep['max_abs_roll_rate']:.2f} рад/с, "
-        f"скорость корпуса {ep['max_body_speed']:.2f} м/с. "
-        f"Сбой {timing}. {mixed_comment(ep)}"
+        f"Mixed case: friction={ep['friction']:.3f}, "
+        f"push {push}, "
+        f"|qvel[3]|={ep['max_abs_roll_rate']:.2f} rad/s, "
+        f"torso speed {ep['max_body_speed']:.2f} m/s. "
+        f"Failure {timing}. {mixed_comment(ep)}"
     )
 
 
@@ -393,14 +386,14 @@ def level_ci(level: dict) -> tuple[float, float]:
 
 def format_pct(rate: float) -> str:
     if rate != rate:  # NaN
-        return "н/д"
+        return "n/a"
     return f"{100.0 * rate:.1f}%"
 
 
 def format_ci(ci: tuple[float, float]) -> str:
     lo, hi = ci
     if lo != lo or hi != hi:
-        return "н/д"
+        return "n/a"
     return f"[{100.0 * lo:.1f}, {100.0 * hi:.1f}]%"
 
 
@@ -434,16 +427,16 @@ def effect_kind(level: dict, baseline_id: str | None, base_rate: float) -> str:
 
 def effect_direction_ru(kind: str) -> str:
     if kind == "harmful":
-        return "усиление сбоев"
+        return "increase in failures"
     if kind == "improving":
-        return "ослабление сбоев"
+        return "decrease in failures"
     if kind == "baseline":
-        return "норма"
-    return "в пределах шума"
+        return "baseline"
+    return "within noise"
 
 
 def axis_samples(level: dict, param_id: str | None = None) -> list[tuple[str, float]]:
-    """Скаляры уровня из payload фактора. Не подставляет зашитые xml-числа."""
+    """Level scalars from the factor payload. Does not fill in hardcoded xml numbers."""
     _ = param_id
     factor = level.get("factor") or {}
     kind = str(factor.get("kind") or "")
@@ -505,11 +498,11 @@ def cite_level(
         bits.append(f"seed={seed}")
     if level:
         k, n = level_counts(level)
-        bits.append(f"{k}/{n} сбоев")
+        bits.append(f"{k}/{n} failures")
         outcomes = level.get("outcomes") or []
         if outcomes:
             episodes = [_as_int(row.get("episode")) for row in outcomes]
-            bits.append(f"outcomes эпизодов {min(episodes)}–{max(episodes)}")
+            bits.append(f"outcomes of episodes {min(episodes)}-{max(episodes)}")
     return ", ".join(bits)
 
 
@@ -578,14 +571,14 @@ def interpolate_threshold(
                     "right_dose": d1,
                     "right_rate": r1,
                     "measured": False,
-                    "note": "гипотеза",
+                    "note": "hypothesis",
                 }
             )
     return crossings
 
 
 def mcnemar_exact_paired(base_outcomes: list[dict], treat_outcomes: list[dict]) -> dict:
-    """Точный Макнемар на парных исходах. Только для проверки Шага 4, статистику Шага 3 не меняет."""
+    """Exact McNemar on paired outcomes. Step 4 check only; Step 3 statistics stay unchanged."""
     from statsmodels.stats.contingency_tables import mcnemar
 
     base_by = {int(o["episode"]): bool(o["failed"]) for o in base_outcomes}
@@ -770,19 +763,19 @@ def verify_status(
     before_rate = sweep_level_rate(before)
     after_rate = sweep_level_rate(after)
     if after_rate >= before_rate - 1e-12:
-        return "не подтверждено"
+        return "not confirmed"
     after_is_baseline = after.get("id") == finding.get("baseline_id")
     if after_is_baseline and finding.get("kind") == "harmful" and finding.get("p_holm") is not None:
         if _as_float(finding.get("p_holm"), 1.0) <= 0.05:
-            return "подтверждено"
+            return "confirmed"
     before_ci = level_ci(before)
     after_ci = level_ci(after)
     if after_ci[1] < before_ci[0]:
-        return "подтверждено"
+        return "confirmed"
     p_mc = None if mcnemar is None else mcnemar.get("pvalue")
     if p_mc is not None and float(p_mc) < 0.05:
-        return "подтверждено"
-    return "гипотеза"
+        return "confirmed"
+    return "hypothesis"
 
 
 def verify_top_weaknesses(payload: dict, findings: list[dict], k: int = VERIFY_TOP_K) -> list[dict]:
@@ -793,8 +786,8 @@ def verify_top_weaknesses(payload: dict, findings: list[dict], k: int = VERIFY_T
             rows.append(
                 {
                     "finding": finding,
-                    "status": "гипотеза",
-                    "reason": "в JSON нет строк уровня для проверки",
+                    "status": "hypothesis",
+                    "reason": "the JSON has no level rows to check",
                 }
             )
             continue
@@ -804,8 +797,8 @@ def verify_top_weaknesses(payload: dict, findings: list[dict], k: int = VERIFY_T
                 {
                     "finding": finding,
                     "before": before,
-                    "status": "гипотеза",
-                    "reason": "нет измеренного уровня в безопасную сторону",
+                    "status": "hypothesis",
+                    "reason": "no measured level on the safer side",
                 }
             )
             continue
@@ -852,16 +845,16 @@ def verify_top_weaknesses(payload: dict, findings: list[dict], k: int = VERIFY_T
 def format_crossings(crossings: list[dict], threshold: float) -> str:
     if not crossings:
         return (
-            f"точка, где доля сбоев превышает {format_pct(threshold)}, "
-            "по измеренным уровням с общей осью не интерполируется (гипотеза)"
+            f"the point where the failure rate exceeds {format_pct(threshold)} "
+            "cannot be interpolated from measured levels on a shared axis (hypothesis)"
         )
     parts = []
     for cr in crossings:
         parts.append(
-            f"порог {format_pct(threshold)} на оси `{cr['axis']}`≈{cr['dose']:.4g} "
-            f"между «{cr['left_label']}» ({format_pct(cr['left_rate'])}) и "
-            f"«{cr['right_label']}» ({format_pct(cr['right_rate'])}) — гипотеза, "
-            "промежуточный уровень не измерялся"
+            f"threshold {format_pct(threshold)} on axis `{cr['axis']}`≈{cr['dose']:.4g} "
+            f"between \"{cr['left_label']}\" ({format_pct(cr['left_rate'])}) and "
+            f"\"{cr['right_label']}\" ({format_pct(cr['right_rate'])}) — hypothesis, "
+            "the intermediate level was not measured"
         )
     return "; ".join(parts)
 
@@ -899,29 +892,29 @@ def scenario_blurb(payload: dict) -> str:
     criterion_txt = (
         f"`{criterion}`"
         if criterion
-        else "поле `failure_criterion` отсутствует"
+        else "field `failure_criterion` is missing"
     )
     blocks = list(iter_sweep_blocks(payload))
     if blocks:
         names = ", ".join(f"`{sid}`" for sid, _sweeps, _root in blocks)
         return (
-            "Автоматический разбор `reports/batch_failures.json`. "
-            f"Критерий сбоя: {criterion_txt}. "
-            f"Сценарии OFAT в файле: {names}."
+            "Automatic reading of `reports/batch_failures.json`. "
+            f"Failure criterion: {criterion_txt}. "
+            f"OFAT scenarios in the file: {names}."
         )
     sid, label = scenario_heading(payload)
     if sid is None:
-        scenario_txt = "поле `scenario` в корне отсутствует"
+        scenario_txt = "root field `scenario` is missing"
     else:
-        scenario_txt = f"сценарий `{sid}`" + (f" — {label}" if label else "")
+        scenario_txt = f"scenario `{sid}`" + (f" — {label}" if label else "")
     return (
-        "Автоматический разбор `reports/batch_failures.json`. "
-        f"Критерий сбоя: {criterion_txt}. {scenario_txt}."
+        "Automatic reading of `reports/batch_failures.json`. "
+        f"Failure criterion: {criterion_txt}. {scenario_txt}."
     )
 
 
 def baseline_fail_reason_lines(payload: dict) -> list[str]:
-    """Один базовый уровень на сценарий: эпизоды факторов не складываются."""
+    """One baseline level per scenario: factor episodes are not summed."""
     lines: list[str] = []
     for sid, sweeps, root in iter_sweep_blocks(payload):
         params = list(sweeps.get("parameters") or [])
@@ -939,27 +932,27 @@ def baseline_fail_reason_lines(payload: dict) -> list[str]:
                 f"{key}={_as_int(reasons[key])}" for key in sorted(reasons)
             )
         elif isinstance(reasons, dict):
-            reason_txt = "fail_reasons пуст"
+            reason_txt = "fail_reasons is empty"
         else:
-            reason_txt = "поле fail_reasons отсутствует"
+            reason_txt = "field fail_reasons is missing"
         k, n = level_counts(level)
         param_id = param.get("id")
         level_id = level.get("id")
         lines.append(
-            f"- `{sid}`: {reason_txt}, сбоев {k}/{n} "
-            f"(базовый уровень `{param_id}`/`{level_id}`, "
+            f"- `{sid}`: {reason_txt}, failures {k}/{n} "
+            f"(baseline level `{param_id}`/`{level_id}`, "
             f"`{root}.parameters[{param_id}].levels[{level_id}].fail_reasons`)."
         )
     return lines
 
 
 def header_stat_lines(payload: dict) -> list[str]:
-    """Шапка только из полей JSON. Корень не подменяет сценарии OFAT."""
+    """Header from JSON fields only. The root record does not replace OFAT scenarios."""
     lines: list[str] = []
     blocks = list(iter_sweep_blocks(payload))
     sweep_ids = {sid for sid, _sweeps, _root in blocks}
     if blocks:
-        lines.append("- сценарии OFAT:")
+        lines.append("- OFAT scenarios:")
         for sid, sweeps, _root in blocks:
             label = sweeps.get("scenario_label")
             label_txt = f" — {label}" if label else ""
@@ -967,25 +960,25 @@ def header_stat_lines(payload: dict) -> list[str]:
             n_txt = (
                 str(int(n_ep))
                 if isinstance(n_ep, (int, float))
-                else "поле `n_episodes` отсутствует"
+                else "field `n_episodes` is missing"
             )
-            lines.append(f"  - `{sid}`{label_txt}: эпизодов на уровень {n_txt}")
+            lines.append(f"  - `{sid}`{label_txt}: episodes per level {n_txt}")
     root_scenario, root_label = scenario_heading(payload)
     if not blocks:
         if root_scenario is None:
-            lines.append("- сценарий: поле `scenario` отсутствует")
+            lines.append("- scenario: field `scenario` is missing")
         else:
             label_txt = f" — {root_label}" if root_label else ""
-            lines.append(f"- сценарий: `{root_scenario}`{label_txt}")
+            lines.append(f"- scenario: `{root_scenario}`{label_txt}")
         n_all = payload.get("n_episodes")
         if n_all is None:
-            lines.append("- всего прогонов: поле `n_episodes` отсутствует")
+            lines.append("- episodes: field `n_episodes` is missing")
         else:
-            lines.append(f"- всего прогонов: {n_all}")
+            lines.append(f"- episodes: {n_all}")
     elif root_scenario is not None and root_scenario not in sweep_ids:
         lines.append(
-            "- в корне JSON есть отдельная запись сценария, она не входит в блоки OFAT "
-            "и в эту шапку как основной сценарий не подставляется"
+            "- the JSON root has a separate scenario record; it is not part of the OFAT blocks "
+            "and is not used as the main scenario in this header"
         )
     kp = payload.get("kp")
     kd = payload.get("kd")
@@ -996,10 +989,10 @@ def header_stat_lines(payload: dict) -> list[str]:
         lines.append(f"- PD: kp={kp}, kd={kd}")
     if payload.get("impulse_start") is not None and payload.get("impulse_end") is not None:
         lines.append(
-            f"- окно удара: шаги {payload['impulse_start']}..{payload['impulse_end']}"
+            f"- impact window: steps {payload['impulse_start']}..{payload['impulse_end']}"
         )
     n_fail_list = len(payload.get("failures") or [])
-    lines.append(f"- эпизодов в списке `failures`: {n_fail_list}")
+    lines.append(f"- episodes in the `failures` list: {n_fail_list}")
     if payload.get("n_sag") is not None:
         sag = payload.get("n_sag")
         sag_rate = payload.get("sag_rate")
@@ -1008,13 +1001,13 @@ def header_stat_lines(payload: dict) -> list[str]:
             if isinstance(sag_rate, (int, float))
             else ""
         )
-        lines.append(f"- просадка z<0.20: {sag}{rate_txt}")
+        lines.append(f"- sag z<0.20: {sag}{rate_txt}")
     return lines
 
 
 def stored_fail_reason_lines(episodes: list[dict]) -> list[str]:
     if not episodes:
-        return ["- список `failures` пуст, разбивки fall/stance_loss по нему нет."]
+        return ["- the `failures` list is empty, so there is no fall/stance_loss split for it."]
     counts: Counter[str] = Counter()
     missing = 0
     for ep in episodes:
@@ -1029,14 +1022,14 @@ def stored_fail_reason_lines(episodes: list[dict]) -> list[str]:
             lines.append(f"- `{name}`: {counts[name]}")
     for name in sorted(counts):
         if name not in {"fall", "stance_loss"}:
-            lines.append(f"- `{name}`: {counts[name]} (как записано в `fail_reason`)")
+            lines.append(f"- `{name}`: {counts[name]} (as stored in `fail_reason`)")
     if missing:
         lines.append(
-            f"- без поля `fail_reason`: {missing}. "
-            "Причина по окну телеметрии не назначается."
+            f"- missing `fail_reason`: {missing}. "
+            "A reason is not assigned from the telemetry window."
         )
     if not lines:
-        lines.append("- в эпизодах нет распознанного `fail_reason`.")
+        lines.append("- episodes have no recognized `fail_reason`.")
     return lines
 
 
@@ -1051,23 +1044,23 @@ def format_level_line(
     rate = sweep_level_rate(level)
     delta = delta_vs_baseline(level, base_rate)
     ci = level_ci(level)
-    mark = " — норма" if kind == "baseline" else ""
+    mark = " — baseline" if kind == "baseline" else ""
     extra = ""
     if kind != "baseline":
         extra = (
-            f", Δ {delta * 100:+.1f} п.п. ({effect_direction_ru(kind)}), "
+            f", delta {delta * 100:+.1f} pp ({effect_direction_ru(kind)}), "
             f"p_holm={format_p(level.get('p_holm'))}"
         )
         if kind == "harmful":
-            extra += " — значимо, вредный эффект"
+            extra += " — significant, harmful effect"
         elif kind == "improving":
-            extra += " — значимо, улучшающий эффект"
+            extra += " — significant, improving effect"
         else:
-            extra += " — в пределах шума"
+            extra += " — within noise"
     return (
         f"- **{level.get('label', level.get('id'))}** (`{level.get('id')}`): "
-        f"доля {format_pct(rate)} ({k}/{n}), Уилсон 95% CI {format_ci(ci)}"
-        f"{extra}{mark}. Источник: {cite}"
+        f"rate {format_pct(rate)} ({k}/{n}), Wilson 95% CI {format_ci(ci)}"
+        f"{extra}{mark}. Source: {cite}"
     )
 
 
@@ -1087,22 +1080,22 @@ def format_one_sweep(
     seed = sweeps.get("seed")
     root = root or "parameter_sweeps"
     n_tests = (sweeps.get("multiple_testing") or {}).get("n_tests")
-    title = heading or "One-factor-at-a-time по параметрам"
+    title = heading or "One-factor-at-a-time by parameter"
     holm_note = (
-        f"Выводы ниже по значимости — только после поправки Холма "
+        f"Significance claims below use the Holm adjustment only "
         f"(n_tests={n_tests}). "
         if n_tests is not None
-        else "Выводы ниже по значимости — только после поправки Холма. "
+        else "Significance claims below use the Holm adjustment only. "
     )
     lines = [
         "",
         f"## {title}",
         "",
-        f"Батч {n_ep} эпизодов на каждый уровень, seed={seed}, "
-        f"сценарий `{sid}` — {slabel}. "
-        "Доля сбоев, 95% CI Уилсона и p_holm vs норма того же фактора. "
+        f"Batch of {n_ep} episodes per level, seed={seed}, "
+        f"scenario `{sid}` — {slabel}. "
+        "Failure rate, Wilson 95% CI, and p_holm vs the baseline of the same factor. "
         + holm_note
-        + "Направление: усиление сбоев (доля выше нормы) или ослабление сбоев (доля ниже нормы).",
+        + "Direction: increase in failures (rate above baseline) or decrease in failures (rate below baseline).",
         "",
     ]
     any_harmful = False
@@ -1131,40 +1124,40 @@ def format_one_sweep(
         if harmful:
             any_harmful = True
             crossings = interpolate_threshold(param, threshold)
-            lines.append("Значимые вредные эффекты (Холм):")
+            lines.append("Significant harmful effects (Holm):")
             for level in harmful:
                 k, n = level_counts(level)
                 ci = level_ci(level)
                 lines.append(
                     f"- **{level.get('label', level.get('id'))}**: "
-                    f"{effect_direction_ru('harmful')}, доля {format_pct(sweep_level_rate(level))} "
-                    f"({k}/{n}), Уилсон 95% CI {format_ci(ci)}, "
+                    f"{effect_direction_ru('harmful')}, rate {format_pct(sweep_level_rate(level))} "
+                    f"({k}/{n}), Wilson 95% CI {format_ci(ci)}, "
                     f"p_holm={format_p(level.get('p_holm'))}, "
-                    f"Δ {delta_vs_baseline(level, base_rate) * 100:+.1f} п.п. "
-                    f"Источник: {cite_level(root, sid, param_id, str(level.get('id')), level, seed)}."
+                    f"delta {delta_vs_baseline(level, base_rate) * 100:+.1f} pp. "
+                    f"Source: {cite_level(root, sid, param_id, str(level.get('id')), level, seed)}."
                 )
             lines.append(f"- {format_crossings(crossings, threshold).capitalize()}.")
             lines.append("")
         else:
-            lines.append("значимого вредного эффекта не найдено.")
+            lines.append("no significant harmful effect found.")
             lines.append("")
         if improving:
-            lines.append("Значимые улучшающие эффекты:")
+            lines.append("Significant improving effects:")
             for level in improving:
                 k, n = level_counts(level)
                 ci = level_ci(level)
                 lines.append(
                     f"- **{level.get('label', level.get('id'))}**: "
-                    f"улучшающий эффект, доля {format_pct(sweep_level_rate(level))} "
-                    f"({k}/{n}), Уилсон 95% CI {format_ci(ci)}, "
+                    f"improving effect, rate {format_pct(sweep_level_rate(level))} "
+                    f"({k}/{n}), Wilson 95% CI {format_ci(ci)}, "
                     f"p_holm={format_p(level.get('p_holm'))}, "
-                    f"Δ {delta_vs_baseline(level, base_rate) * 100:+.1f} п.п. "
-                    f"Источник: {cite_level(root, sid, param_id, str(level.get('id')), level, seed)}."
+                    f"delta {delta_vs_baseline(level, base_rate) * 100:+.1f} pp. "
+                    f"Source: {cite_level(root, sid, param_id, str(level.get('id')), level, seed)}."
                 )
             lines.append("")
     if not any_harmful:
         lines += [
-            "По этому сценарию значимого вредного эффекта не найдено.",
+            "No significant harmful effect found for this scenario.",
             "",
         ]
     return lines
@@ -1178,8 +1171,8 @@ def format_sweep_sections(payload: dict, threshold: float = FAIL_RATE_THRESHOLD)
     for sid, sweeps, root in blocks:
         label = sweeps.get("scenario_label") or sid
         role = {
-            "nominal": "контроль",
-            "moderate": "чувствительность",
+            "nominal": "control",
+            "moderate": "sensitivity",
         }.get(sid, sid)
         heading = f"OFAT: {sid} ({role}) — {label}" if sid in {"nominal", "moderate"} else f"OFAT: {sid} — {label}"
         lines += format_one_sweep(sweeps, heading, root=root, threshold=threshold)
@@ -1222,10 +1215,10 @@ def build_diagnosis_payload(
         recs.append(
             {
                 "text": (
-                    "значимого вредного эффекта не найдено: ни один ненулевой уровень OFAT "
-                    "не имеет значимого усиления сбоев после поправки Холма."
+                    "no significant harmful effect found: no non-baseline OFAT level "
+                    "has a significant increase in failures after the Holm adjustment."
                 ),
-                "cite": "parameter_sweeps_by_scenario.*.parameters[*].levels[*] (significant=false или Δ≤0)",
+                "cite": "parameter_sweeps_by_scenario.*.parameters[*].levels[*] (significant=false or delta<=0)",
                 "kind": "none",
             }
         )
@@ -1233,14 +1226,14 @@ def build_diagnosis_payload(
         recs.append(
             {
                 "text": (
-                    f"Фактор `{item['param_id']}` ({item['param_name']}), уровень "
-                    f"«{item['level_label']}» (`{item['level_id']}`), сценарий `{item['scenario_id']}`: "
-                    f"{item['direction']}, доля {format_pct(item['rate'])} "
+                    f"Factor `{item['param_id']}` ({item['param_name']}), level "
+                    f"\"{item['level_label']}\" (`{item['level_id']}`), scenario `{item['scenario_id']}`: "
+                    f"{item['direction']}, rate {format_pct(item['rate'])} "
                     f"({item['n_failures']}/{item['n_episodes']}), "
-                    f"Уилсон 95% CI {format_ci(tuple(item['ci95']))}, "
+                    f"Wilson 95% CI {format_ci(tuple(item['ci95']))}, "
                     f"p_holm={format_p(item['p_holm'])}, "
-                    f"Δ {item['delta'] * 100:+.1f} п.п. к норме "
-                    f"«{item['baseline_label']}» ({format_pct(item['baseline_rate'])}). "
+                    f"delta {item['delta'] * 100:+.1f} pp vs baseline "
+                    f"\"{item['baseline_label']}\" ({format_pct(item['baseline_rate'])}). "
                     f"{format_crossings(item.get('crossings') or [], threshold).capitalize()}."
                 ),
                 "cite": item["cite"],
@@ -1254,13 +1247,13 @@ def build_diagnosis_payload(
         recs.append(
             {
                 "text": (
-                    f"Фактор `{item['param_id']}` ({item['param_name']}), уровень "
-                    f"«{item['level_label']}» (`{item['level_id']}`), сценарий `{item['scenario_id']}`: "
-                    f"улучшающий эффект, доля {format_pct(item['rate'])} "
+                    f"Factor `{item['param_id']}` ({item['param_name']}), level "
+                    f"\"{item['level_label']}\" (`{item['level_id']}`), scenario `{item['scenario_id']}`: "
+                    f"improving effect, rate {format_pct(item['rate'])} "
                     f"({item['n_failures']}/{item['n_episodes']}), "
-                    f"Уилсон 95% CI {format_ci(tuple(item['ci95']))}, "
+                    f"Wilson 95% CI {format_ci(tuple(item['ci95']))}, "
                     f"p_holm={format_p(item['p_holm'])}, "
-                    f"Δ {item['delta'] * 100:+.1f} п.п. к норме."
+                    f"delta {item['delta'] * 100:+.1f} pp vs baseline."
                 ),
                 "cite": item["cite"],
                 "kind": "improving",
@@ -1317,31 +1310,31 @@ def build_diagnosis_payload(
 def format_recommendation_sections(diag: dict, threshold: float = FAIL_RATE_THRESHOLD) -> list[str]:
     lines = [
         "",
-        "## Рекомендации (только значимые эффекты после Холма)",
+        "## Recommendations (significant effects after Holm only)",
         "",
-        "Шаблоны про железо и произвольные числа из кода не используются. "
-        "Каждый пункт ссылается на уровень OFAT в `reports/batch_failures.json`.",
+        "Hardware templates and hardcoded numbers from the code are not used. "
+        "Each item cites an OFAT level in `reports/batch_failures.json`.",
         "",
     ]
     recs = diag.get("recommendations") or []
     if not recs:
-        lines.append("значимого вредного эффекта не найдено.")
+        lines.append("no significant harmful effect found.")
         lines.append("")
     else:
         for rec in recs:
             lines.append(f"- {rec['text']}")
-            lines.append(f"  Источник: {rec['cite']}.")
+            lines.append(f"  Source: {rec['cite']}.")
             lines.append("")
     lines += [
-        "## Проверка топ-3 значимых слабостей (сдвиг в безопасную сторону)",
+        "## Check of the top 3 significant weaknesses (shift toward the safer side)",
         "",
-        "Для каждой слабости берётся значимый вредный уровень и соседний уже измеренный "
-        "уровень OFAT ближе к норме (те же seed). До и после — доля сбоев и 95% CI Уилсона.",
+        "Each weakness uses a significant harmful level and the nearest already measured "
+        "OFAT level closer to baseline (same seeds). Before and after are the failure rate and Wilson 95% CI.",
         "",
     ]
     verifications = diag.get("verifications_raw") or []
     if not verifications:
-        lines.append("значимого вредного эффекта не найдено — проверять нечего.")
+        lines.append("no significant harmful effect found — nothing to check.")
         lines.append("")
         return lines
     for i, row in enumerate(verifications, start=1):
@@ -1350,35 +1343,35 @@ def format_recommendation_sections(diag: dict, threshold: float = FAIL_RATE_THRE
             lines.append(
                 f"{i}. `{finding.get('param_id')}` / `{finding.get('level_id')}`: "
                 f"{row.get('status')} ({row.get('reason')}). "
-                f"Источник: {finding.get('cite')}."
+                f"Source: {finding.get('cite')}."
             )
             lines.append("")
             continue
         p_mc = None if not row.get("mcnemar") else row["mcnemar"].get("pvalue")
         lines.append(
-            f"{i}. **{finding['param_name']}** (`{finding['param_id']}`), сценарий "
-            f"`{finding['scenario_id']}`: «{row['before_label']}» → «{row['after_label']}» "
+            f"{i}. **{finding['param_name']}** (`{finding['param_id']}`), scenario "
+            f"`{finding['scenario_id']}`: \"{row['before_label']}\" → \"{row['after_label']}\" "
             f"({row['move']})."
         )
         lines.append(
-            f"   - до: доля {format_pct(row['before_rate'])} "
+            f"   - before: rate {format_pct(row['before_rate'])} "
             f"({row['before_n_failures']}/{row['before_n_episodes']}), "
-            f"Уилсон 95% CI {format_ci(tuple(row['before_ci']))}. "
-            f"Источник: {row['before_cite']}."
+            f"Wilson 95% CI {format_ci(tuple(row['before_ci']))}. "
+            f"Source: {row['before_cite']}."
         )
         lines.append(
-            f"   - после: доля {format_pct(row['after_rate'])} "
+            f"   - after: rate {format_pct(row['after_rate'])} "
             f"({row['after_n_failures']}/{row['after_n_episodes']}), "
-            f"Уилсон 95% CI {format_ci(tuple(row['after_ci']))}. "
-            f"Источник: {row['after_cite']}."
+            f"Wilson 95% CI {format_ci(tuple(row['after_ci']))}. "
+            f"Source: {row['after_cite']}."
         )
         lines.append(
-            f"   - статус: **{row['status']}**"
-            + (f" (точный Макнемар до/после p={format_p(p_mc)})" if p_mc is not None else "")
+            f"   - status: **{row['status']}**"
+            + (f" (exact McNemar before/after p={format_p(p_mc)})" if p_mc is not None else "")
             + "."
         )
         lines.append(
-            f"   - порог {format_pct(threshold)}: "
+            f"   - threshold {format_pct(threshold)}: "
             f"{format_crossings(finding.get('crossings') or [], threshold)}."
         )
         lines.append("")
@@ -1393,27 +1386,27 @@ def build_markdown(payload: dict, episodes: list[dict], diag: dict | None = None
         diag = build_diagnosis_payload(payload)
 
     criterion = failure_criterion_label(payload)
-    criterion_txt = f"`{criterion}`" if criterion else "поле `failure_criterion` отсутствует"
+    criterion_txt = f"`{criterion}`" if criterion else "field `failure_criterion` is missing"
 
     lines = [
-        "# Диагностика сбоев Go2",
+        "# Go2 failure diagnosis",
         "",
         scenario_blurb(payload),
         "",
-        "## Общая статистика",
+        "## Summary",
         "",
         *header_stat_lines(payload),
         "",
-        "## Категории сбоев",
+        "## Failure categories",
         "",
-        f"Критерий сбоя: {criterion_txt}. В данных это `fall` и `stance_loss` из `fail_reason`.",
+        f"Failure criterion: {criterion_txt}. In the data this is `fall` and `stance_loss` from `fail_reason`.",
         "",
     ]
     reason_lines = baseline_fail_reason_lines(payload)
     if reason_lines:
         lines.append(
-            "Базовый уровень OFAT (берётся один фактор на сценарий, "
-            "эпизоды разных параметров не суммируются):"
+            "OFAT baseline level (one factor per scenario; "
+            "episodes of different parameters are not summed):"
         )
         lines.extend(reason_lines)
         lines.append("")
@@ -1426,45 +1419,45 @@ def build_markdown(payload: dict, episodes: list[dict], diag: dict | None = None
 
     lines += [
         "",
-        "## Сбои при/после удара (шаг ≥ 450)",
+        "## Failures at/after impact (step >= 450)",
         "",
-        f"- эпизодов, не упавших до {impact['impulse_start']}-го шага: {impact['n_reached']}",
-        f"- сбоев при/после удара (`during_impact` + `after_impact`): {impact['n_at_or_after']}",
+        f"- episodes that had not failed before step {impact['impulse_start']}: {impact['n_reached']}",
+        f"- failures at/after impact (`during_impact` + `after_impact`): {impact['n_at_or_after']}",
         (
-            f"- доля сбоев среди дошедших до окна удара: "
+            f"- failure rate among episodes that reached the impact window: "
             f"{impact['share_among_reached'] * 100:.1f}%"
         ),
         (
-            f"- сбоев до включения Fy (`before_impact`): {impact['n_before']} "
-            "— их нельзя относить к последствию боковой силы"
+            f"- failures before Fy turns on (`before_impact`): {impact['n_before']} "
+            "— these are not a consequence of the lateral force"
         ),
         "",
-        "## Разбивка сбоев по фазам удара",
+        "## Failures by impact phase",
         "",
     ]
     for phase, label, n, pct in phases:
         extra = ""
         if phase == PHASE_BEFORE and n:
-            extra = " — падение ещё до включения силы Fy"
-        lines.append(f"- **{label}** (`{phase}`): {n} шт. ({pct:.1f}% от сбоев){extra}")
+            extra = " — fall before the Fy force turns on"
+        lines.append(f"- **{label}** (`{phase}`): {n} ({pct:.1f}% of failures){extra}")
 
-    lines += ["", "## Показательные примеры", ""]
+    lines += ["", "## Example episodes", ""]
 
     if not examples:
-        lines.append("Примеров нет.")
+        lines.append("No examples.")
     else:
         for i, ep in enumerate(examples, start=1):
-            reason = ep.get("fail_reason") or "поле fail_reason отсутствует"
+            reason = ep.get("fail_reason") or "field fail_reason is missing"
             lines += [
-                f"### Пример {i}. Эпизод {ep['episode']} — {reason}",
+                f"### Example {i}. Episode {ep['episode']} — {reason}",
                 "",
-                f"- трение: {ep['friction']:.3f}",
-                f"- боковая сила: {format_push(ep)}",
-                f"- сбой: шаг {ep['fail_step']} ({ep['fail_vs_impulse']}), "
-                f"t={ep['fail_time']:.3f} с, z={ep['final_z']:.3f}",
-                f"- макс. |qvel[3]| (крен): {ep['max_abs_roll_rate']:.3f} рад/с",
-                f"- макс. скорость корпуса: {ep['max_body_speed']:.3f} м/с",
-                f"- высота в окне: {ep['z_first']:.3f} → {ep['z_last']:.3f}",
+                f"- friction: {ep['friction']:.3f}",
+                f"- lateral force: {format_push(ep)}",
+                f"- failure: step {ep['fail_step']} ({ep['fail_vs_impulse']}), "
+                f"t={ep['fail_time']:.3f} s, z={ep['final_z']:.3f}",
+                f"- max |qvel[3]| (roll): {ep['max_abs_roll_rate']:.3f} rad/s",
+                f"- max torso speed: {ep['max_body_speed']:.3f} m/s",
+                f"- height in the window: {ep['z_first']:.3f} → {ep['z_last']:.3f}",
                 "",
             ]
 
@@ -1477,24 +1470,24 @@ def ask_gemini(report: str, api_key: str) -> str:
     from google import genai
 
     prompt = (
-        "Ниже готовый отчёт по падениям квадропода Go2. "
-        "Сделай углублённый разбор на русском: подтверди или поправь категории, "
-        "укажи, чего не хватает простому PD, и дай ещё 3 практичных шага для контроллера. "
-        "Пиши коротко.\n\n"
+        "Below is a finished report on Go2 quadruped falls. "
+        "Write a short deeper review in English: confirm or correct the categories, "
+        "say what a plain PD is missing, and give 3 more practical controller steps. "
+        "Keep it short.\n\n"
         + report
     )
     client = genai.Client(api_key=api_key)
     response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
     text = getattr(response, "text", None)
     if not text:
-        raise RuntimeError("Gemini вернул пустой ответ")
+        raise RuntimeError("Gemini returned an empty response")
     return text.strip()
 
 
 def main() -> None:
     if not FAILURES_PATH.exists():
         raise FileNotFoundError(
-            f"нет файла {FAILURES_PATH}, сначала запусти step3_batch_stress.py"
+            f"missing file {FAILURES_PATH}; run step3_batch_stress.py first"
         )
 
     payload = json.loads(FAILURES_PATH.read_text(encoding="utf-8"))
@@ -1514,15 +1507,15 @@ def main() -> None:
     if api_key:
         try:
             extra = ask_gemini(report, api_key)
-            report = report + "\n## Углублённый разбор Gemini\n\n" + extra + "\n"
-            print("\n## Углублённый разбор Gemini\n")
+            report = report + "\n## Gemini analysis\n\n" + extra + "\n"
+            print("\n## Gemini analysis\n")
             print(extra)
         except Exception as exc:
-            print(f"\nGemini недоступен ({type(exc).__name__}: {exc}). Сохранён локальный отчёт.")
+            print(f"\nGemini is unavailable ({type(exc).__name__}: {exc}). Local report saved.")
 
     REPORT_PATH.write_text(report, encoding="utf-8")
-    print(f"\nотчёт сохранён: {REPORT_PATH}")
-    print(f"рекомендации JSON: {RECS_JSON_PATH}")
+    print(f"\nreport saved: {REPORT_PATH}")
+    print(f"recommendations JSON: {RECS_JSON_PATH}")
 
 
 if __name__ == "__main__":

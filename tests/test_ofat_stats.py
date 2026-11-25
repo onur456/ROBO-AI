@@ -1,4 +1,4 @@
-"""Точный Макнемар и поправка Холма без прогона MuJoCo."""
+"""Exact McNemar and Holm adjustment without a MuJoCo run."""
 
 from __future__ import annotations
 

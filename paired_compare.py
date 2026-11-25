@@ -12,10 +12,10 @@ from pathlib import Path
 from step3_batch_stress import holm_adjust, mcnemar_exact_paired, wilson_ci
 
 ALPHA = 0.05
-WORSE = "значимое усиление сбоев"
-BETTER = "значимое ослабление сбоев"
-NOISE = "в пределах шума"
-NO_PAIR = "нет общих seed"
+WORSE = "significant worsening"
+BETTER = "significant improvement"
+NOISE = "within noise"
+NO_PAIR = "no shared seeds"
 
 
 def _as_failed(row: dict) -> bool:
@@ -60,7 +60,7 @@ def collect_units(payload) -> list[dict]:
                 "scenario": "run",
                 "param": "all",
                 "level": "all",
-                "label": "все эпизоды",
+                "label": "all episodes",
                 "outcomes": payload,
             }
         ]
@@ -97,7 +97,7 @@ def collect_units(payload) -> list[dict]:
     outcomes = payload.get("outcomes") or payload.get("episodes") or []
     if not isinstance(outcomes, list) or not outcomes:
         return []
-    label = str(payload.get("label") or payload.get("scenario") or "все эпизоды")
+    label = str(payload.get("label") or payload.get("scenario") or "all episodes")
     return [
         {
             "key": ("run", "all", "all"),
@@ -155,16 +155,16 @@ def _pair_level(before: dict, after: dict) -> dict:
     warnings = []
     if only_a or only_b:
         warnings.append(
-            f"seed не совпали полностью: только в A {len(only_a)}, только в B {len(only_b)}"
+            f"seeds do not fully overlap: only in A {len(only_a)}, only in B {len(only_b)}"
         )
     if a_notes["duplicate_seeds"] or b_notes["duplicate_seeds"]:
         warnings.append(
-            "повторные seed внутри прогона пропущены "
+            "duplicate seeds inside a run were skipped "
             f"(A {len(a_notes['duplicate_seeds'])}, B {len(b_notes['duplicate_seeds'])})"
         )
     if a_notes["n_missing_seed"] or b_notes["n_missing_seed"]:
         warnings.append(
-            "строки без seed пропущены "
+            "rows without a seed were skipped "
             f"(A {a_notes['n_missing_seed']}, B {b_notes['n_missing_seed']})"
         )
     return {
@@ -238,18 +238,18 @@ def context_warnings(before: dict, after: dict) -> list[str]:
     z_a = _as_float(before.get("z_ref"))
     z_b = _as_float(after.get("z_ref"))
     if z_a is not None and z_b is not None and abs(z_a - z_b) > 1e-4:
-        notes.append(f"z_ref различается: A {z_a:.4f} м, B {z_b:.4f} м")
+        notes.append(f"z_ref differs: A {z_a:.4f} m, B {z_b:.4f} m")
     thr_a = _as_float(before.get("z_threshold"))
     thr_b = _as_float(after.get("z_threshold"))
     if thr_a is not None and thr_b is not None and abs(thr_a - thr_b) > 1e-4:
         notes.append(
-            f"порог stance_loss по z различается: A z<{thr_a:.4f} м, B z<{thr_b:.4f} м"
+            f"stance_loss z threshold differs: A z<{thr_a:.4f} m, B z<{thr_b:.4f} m"
         )
     slip_a = _as_float(before.get("slip_threshold"))
     slip_b = _as_float(after.get("slip_threshold"))
     if slip_a is not None and slip_b is not None and abs(slip_a - slip_b) > 1e-4:
         notes.append(
-            f"порог stance_loss по slip различается: A slip>{slip_a:.4f} м, B slip>{slip_b:.4f} м"
+            f"stance_loss slip threshold differs: A slip>{slip_a:.4f} m, B slip>{slip_b:.4f} m"
         )
     return notes
 
@@ -279,8 +279,8 @@ def compare_runs(before_payload, after_payload) -> dict:
     unmatched = []
     if only_before or only_after:
         unmatched.append(
-            "уровни без пары: "
-            f"только в A {len(only_before)}, только в B {len(only_after)}"
+            "levels without a pair: "
+            f"only in A {len(only_before)}, only in B {len(only_after)}"
         )
     seed_warn = [note for row in rows for note in row["warnings"]]
     before_meta = run_context(before_payload)
@@ -317,67 +317,67 @@ def compare_runs(before_payload, after_payload) -> dict:
 
 def _fmt_p(value) -> str:
     if value is None:
-        return "нет"
+        return "n/a"
     return f"{float(value):.4g}"
 
 
 def _fmt_ci(block: dict) -> str:
     lo, hi = block["ci95"]
     if block["n"] <= 0:
-        return "нет"
+        return "n/a"
     return f"[{lo * 100:.1f}, {hi * 100:.1f}]"
 
 
 def _fmt_meta_num(value, unit: str) -> str:
     number = _as_float(value)
     if number is None:
-        return "нет"
+        return "n/a"
     return f"{number:.4f} {unit}"
 
 
 def _fmt_context(tag: str, meta: dict) -> str:
     if not meta:
-        return f"{tag}: метаданные контроллера и эталона в JSON нет"
-    ctrl = meta.get("controller") or "нет"
-    pd_name = meta.get("pd") or "нет"
+        return f"{tag}: JSON has no controller or stance-reference metadata"
+    ctrl = meta.get("controller") or "n/a"
+    pd_name = meta.get("pd") or "n/a"
     kp = meta.get("kp")
     kd = meta.get("kd")
-    kp_txt = f"{float(kp):g}" if _as_float(kp) is not None else "нет"
-    kd_txt = f"{float(kd):g}" if _as_float(kd) is not None else "нет"
+    kp_txt = f"{float(kp):g}" if _as_float(kp) is not None else "n/a"
+    kd_txt = f"{float(kd):g}" if _as_float(kd) is not None else "n/a"
     z_thr = meta.get("z_threshold")
     slip = meta.get("slip_threshold")
-    thr = "нет"
+    thr = "n/a"
     if _as_float(z_thr) is not None or _as_float(slip) is not None:
-        z_part = f"z<{float(z_thr):.4f} м" if _as_float(z_thr) is not None else "z нет"
-        slip_part = f"slip>{float(slip):.4f} м" if _as_float(slip) is not None else "slip нет"
+        z_part = f"z<{float(z_thr):.4f} m" if _as_float(z_thr) is not None else "z n/a"
+        slip_part = f"slip>{float(slip):.4f} m" if _as_float(slip) is not None else "slip n/a"
         thr = f"{z_part}, {slip_part}"
     return (
-        f"{tag}: контроллер {ctrl}, PD {pd_name}, kp={kp_txt}, kd={kd_txt}, "
-        f"z_ref={_fmt_meta_num(meta.get('z_ref'), 'м')}, порог stance_loss: {thr}"
+        f"{tag}: controller {ctrl}, PD {pd_name}, kp={kp_txt}, kd={kd_txt}, "
+        f"z_ref={_fmt_meta_num(meta.get('z_ref'), 'm')}, stance_loss threshold: {thr}"
     )
 
 
 def format_report(result: dict) -> str:
     lines = [
-        "Парное сравнение по общим seed (A до, B после).",
+        "Paired comparison on shared seeds (A before, B after).",
         _fmt_context("A", result.get("before_meta") or {}),
         _fmt_context("B", result.get("after_meta") or {}),
-        f"Уровней {result['n_levels']}, тестов Макнемара в семье Холма {result['n_tests']}, alpha={result['alpha']}.",
+        f"Levels {result['n_levels']}, McNemar tests in the Holm family {result['n_tests']}, alpha={result['alpha']}.",
         "",
     ]
     if not result["rows"]:
-        lines.append("Сопоставимых уровней нет.")
+        lines.append("No comparable levels.")
     for row in result["rows"]:
         lines.append(
             f"- {row['scenario']} / {row['param']} / {row['level']} ({row['label']}): "
-            f"общих seed {row['n_shared']}"
+            f"shared seeds {row['n_shared']}"
         )
         lines.append(
             f"    A {row['before']['n_failures']}/{row['before']['n']} "
-            f"ДИ {_fmt_ci(row['before'])}  "
+            f"CI {_fmt_ci(row['before'])}  "
             f"B {row['after']['n_failures']}/{row['after']['n']} "
-            f"ДИ {_fmt_ci(row['after'])}  "
-            f"Δ {row['delta_pp']:+.1f} п.п."
+            f"CI {_fmt_ci(row['after'])}  "
+            f"delta {row['delta_pp']:+.1f} pp"
         )
         lines.append(
             f"    0->1 {row['n_0_to_1']}  1->0 {row['n_1_to_0']}  "
@@ -386,19 +386,19 @@ def format_report(result: dict) -> str:
         )
     lines.append("")
     if result["strongest"]:
-        lines.append("Самые сильные значимые сдвиги:")
+        lines.append("Strongest significant shifts:")
         for row in result["strongest"]:
             lines.append(
                 f"- {row['scenario']} / {row['param']} / {row['level']}: "
-                f"{row['direction']}, Δ {row['delta_pp']:+.1f} п.п., "
+                f"{row['direction']}, delta {row['delta_pp']:+.1f} pp, "
                 f"0->1 {row['n_0_to_1']}, 1->0 {row['n_1_to_0']}, "
                 f"p_holm={_fmt_p(row['p_holm'])}"
             )
     else:
-        lines.append("Значимых сдвигов после Холма нет.")
+        lines.append("No significant shifts after Holm.")
     if result["warnings"]:
         lines.append("")
-        lines.append("Предупреждения:")
+        lines.append("Warnings:")
         for note in result["warnings"]:
             lines.append(f"- {note}")
     return "\n".join(lines)
@@ -417,9 +417,9 @@ def run_compare_files(before_path: str, after_path: str, out_path: str | None) -
     before = Path(before_path)
     after = Path(after_path)
     if not before.is_file():
-        raise FileNotFoundError(f"нет файла прогона A: {before}")
+        raise FileNotFoundError(f"run A file not found: {before}")
     if not after.is_file():
-        raise FileNotFoundError(f"нет файла прогона B: {after}")
+        raise FileNotFoundError(f"run B file not found: {after}")
     result = compare_runs(_load(before), _load(after))
     text = format_report(result)
     print(text)
@@ -427,8 +427,8 @@ def run_compare_files(before_path: str, after_path: str, out_path: str | None) -
         dest = Path(out_path)
         if _forbidden(dest):
             raise ValueError(
-                f"отказ записи в {dest.name}: парное сравнение не перезаписывает "
-                "batch_failures.json и final_diagnosis.md"
+                f"refusing to write {dest.name}: paired comparison does not overwrite "
+                "batch_failures.json or final_diagnosis.md"
             )
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(

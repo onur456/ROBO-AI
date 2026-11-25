@@ -81,8 +81,8 @@ FYCRIT_PATH = Path("reports") / "fy_crit_ofat.json"
 TORQUE_TEST_PATH = Path("reports") / "torque_limit_test.json"
 N_TORQUE_EPISODES = 100
 TORQUE_TEST_SCALES = (1.0, 0.5, 0.25, 0.05)
-LIMIT_INACTIVE_NOTE = "лимит не достигнут / не влияет на данном уровне"
-LIMIT_ACTIVE_NOTE = "насыщение активно"
+LIMIT_INACTIVE_NOTE = "limit not reached / no effect at this level"
+LIMIT_ACTIVE_NOTE = "saturation active"
 SCENARIOS = {
     "default": {
         "id": "default",
@@ -455,57 +455,57 @@ def parse_args() -> argparse.Namespace:
         choices=("full", "quick", "ofat", "grid", "sag", "ff", "criteria", "fycrit", "pd_ff", "torque"),
         default="full",
         help=(
-            "full: единичные проверки, сравнение PD, OFAT и основной батч; "
-            "quick: только основной батч в reports/batch_failures.json; "
-            "ofat: OFAT на nominal (контроль) и moderate (чувствительность); "
-            "grid: стойка, сетка Fy/μ, обрыв и траектории μ=0.2 (не трогает batch_failures.json); "
-            "sag: сравнение вариантов стойки; "
-            "ff: диагностика gravity feed-forward; "
-            "criteria: пороги 3σ, чувствительность, лёд; "
-            "fycrit: OFAT в терминах Fy_crit; "
-            "pd_ff: вариант PD+контактный FF, базу не меняет; "
-            "torque: проверка torque_limit 100/50/25/5%%"
+            "full: single probes, PD comparison, OFAT, and the main batch; "
+            "quick: main batch only, written to reports/batch_failures.json; "
+            "ofat: OFAT on nominal (control) and moderate (sensitivity); "
+            "grid: stance, Fy/mu grid, cliff, and mu=0.2 traces (does not touch batch_failures.json); "
+            "sag: stance-variant comparison; "
+            "ff: gravity feed-forward diagnosis; "
+            "criteria: 3-sigma thresholds, sensitivity, ice; "
+            "fycrit: OFAT in Fy_crit units; "
+            "pd_ff: PD plus contact FF, baseline unchanged; "
+            "torque: torque_limit check at 100/50/25/5%%"
         ),
     )
     parser.add_argument(
         "--pd",
         choices=tuple(PD_MODES),
         default=MAIN_MODE,
-        help="PD-режим: baseline=kp40/kd3, weak_pd=kp25/kd1.5 (старый), stiff=алиас baseline",
+        help="PD mode: baseline=kp40/kd3, weak_pd=kp25/kd1.5 (legacy), stiff=alias of baseline",
     )
     parser.add_argument(
         "--scenario",
         choices=tuple(SCENARIOS),
         default="default",
         help=(
-            "default/extreme: μ 0.05–1, Fy до ±350 Н; "
-            "nominal: μ 0.6–1, Fy до ±100 Н; "
-            "moderate: μ 0.4–1, Fy до ±250 Н; "
-            "slip_only: скольжение/стойка при Fy=0; "
-            "heavy_impact: усиленный удар (Fy до ±500 Н)"
+            "default/extreme: mu 0.05-1, Fy up to +/-350 N; "
+            "nominal: mu 0.6-1, Fy up to +/-100 N; "
+            "moderate: mu 0.4-1, Fy up to +/-250 N; "
+            "slip_only: slip/stance at Fy=0; "
+            "heavy_impact: stronger impact (Fy up to +/-500 N)"
         ),
     )
     parser.add_argument(
         "--stance-loss-frac",
         type=float,
         default=STANCE_LOSS_FRAC,
-        help="stance_loss: z после успокоения < frac * высота эталонной стойки (по умолчанию 0.85)",
+        help="stance_loss: settled z < frac * reference stance height (default 0.85)",
     )
     parser.add_argument(
         "--episodes",
         type=int,
         default=300,
-        help="число эпизодов на уровень OFAT и в основном батче (по умолчанию 300)",
+        help="episodes per OFAT level and in the main batch (default 300)",
     )
     parser.add_argument(
         "--controller",
         default=ACTIVE_CONTROLLER,
         help=(
-            "сменный контроллер: pd (kp/kd из --pd: baseline, stiff, weak_pd); "
-            "stance_shift (тот же PD, сдвиг цели 0.2 рад); "
-            "внешний путь.py:КлассИлиФункция или модуль:Атрибут. "
-            "Функция вызывается как compute(obs, step, dt, target_qpos). "
-            "Класс создаётся с kp и kd, если принимает их"
+            "swappable controller: pd (kp/kd from --pd: baseline, stiff, weak_pd); "
+            "stance_shift (same PD, target offset 0.2 rad); "
+            "external path.py:ClassOrFunction or module:Attr. "
+            "A function is called as compute(obs, step, dt, target_qpos). "
+            "A class is constructed with kp and kd when it accepts them"
         ),
     )
     parser.add_argument(
@@ -513,21 +513,21 @@ def parse_args() -> argparse.Namespace:
         nargs=2,
         metavar=("BEFORE", "AFTER"),
         help=(
-            "парное сравнение двух JSON по общим seed: A до, B после. "
-            "Считает Уилсона, Макнемара и Холма и выходит, не запуская симуляцию"
+            "paired comparison of two JSON files on shared seeds: A before, B after. "
+            "Computes Wilson, McNemar, and Holm, then exits without a simulation"
         ),
     )
     parser.add_argument(
         "--compare-out",
         default="reports/paired_compare.json",
-        help="JSON парного сравнения. batch_failures.json и final_diagnosis.md не используются",
+        help="paired-comparison JSON. batch_failures.json and final_diagnosis.md are not used",
     )
     parser.add_argument(
         "--report",
         default=None,
         help=(
-            "куда писать JSON батча. Без флага остаётся reports/batch_failures.json. "
-            "Новый путь не сливается с основным отчётом"
+            "where to write the batch JSON. Without the flag, reports/batch_failures.json. "
+            "A new path is not merged into the main report"
         ),
     )
     return parser.parse_args()
@@ -662,9 +662,9 @@ def holm_adjust(pvalues: list[float], alpha: float = 0.05) -> tuple[list[float],
 
 
 HOLM_FAMILY_NOTE = (
-    "поправка Холма по всем p-значениям точного Макнемара в этом сценарии: "
-    "каждый ненулевой уровень каждого фактора против baseline своего фактора "
-    "(парные эпизоды с общим seed/индексом)"
+    "Holm adjustment over every exact-McNemar p-value in this scenario: "
+    "each non-baseline level of each factor against that factor's baseline "
+    "(paired episodes that share a seed/index)"
 )
 
 
@@ -756,7 +756,7 @@ def write_json(path: Path, payload: dict) -> None:
         json.dumps(payload, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )
-    print(f"результаты сохранены: {path}")
+    print(f"results saved: {path}")
 
 
 def svg_escape(text: str) -> str:
@@ -901,7 +901,7 @@ def set_sliding_friction(model: mujoco.MjModel, geom_ids: list[int], friction: f
 def print_floor_selection(
     model: mujoco.MjModel, floor_id: int, foot_ids: list[int]
 ) -> None:
-    print("геометрия пола:")
+    print("Floor geometry:")
     print(f"  index={floor_id}")
     print(f"  name={geom_name(model, floor_id)!r}")
     print(f"  type={geom_type_name(model, floor_id)}")
@@ -909,7 +909,7 @@ def print_floor_selection(
     print(f"  condim={int(model.geom_condim[floor_id])}")
     print(f"  geom_friction.shape={tuple(model.geom_friction.shape)}")
     print(f"  geom_friction[{floor_id}]={model.geom_friction[floor_id].tolist()}")
-    print("контактные geom лап (выше priority, от них MuJoCo берёт friction контакта):")
+    print("Foot contact geoms (higher priority; MuJoCo takes contact friction from them):")
     for geom_id in foot_ids:
         print(
             f"  id={geom_id} name={geom_name(model, geom_id)!r} "
@@ -1058,13 +1058,13 @@ def command_from_controller(
         cmd = np.asarray(raw_cmd, dtype=float).reshape(-1)
     except (TypeError, ValueError) as exc:
         raise ValueError(
-            f"контроллер {label!r} не вернул числовой вектор управления: {exc}"
+            f"controller {label!r} did not return a numeric command vector: {exc}"
         ) from exc
     n_act = int(model.nu)
     if cmd.size != n_act or not np.all(np.isfinite(cmd)):
         raise ValueError(
-            f"контроллер {label!r} вернул команду длины {int(cmd.size)} "
-            f"(ожидается {n_act} конечных чисел)"
+            f"controller {label!r} returned a command of length {int(cmd.size)} "
+            f"(expected {n_act} finite numbers)"
         )
     data.ctrl[:] = cmd
     if gravity_ff:
@@ -1115,22 +1115,22 @@ def apply_pd(
 
 def episode_status(result: dict) -> str:
     if not result.get("failed") and result.get("fail_step") is None:
-        return "устоял"
+        return "survived"
     step = result.get("fail_step")
     kind = result.get("fall_kind")
     z_end = result.get("z_end")
     body_up = z_end is not None and float(z_end) > CONTACT_Z + 0.02
     if result.get("fail_fall") or kind in ("tilt", "contact_z", "upright_hold"):
         if kind == "contact_z":
-            return f"падение (касание корпусом) на шаге {step}"
+            return f"fall (torso contact) at step {step}"
         if kind in ("tilt", "upright_hold") or body_up:
-            return f"опрокидывание (tilt) на шаге {step}"
-        return f"fall на шаге {step}"
+            return f"tip-over (tilt) at step {step}"
+        return f"fall at step {step}"
     if result.get("fail_stance_loss"):
-        return f"stance_loss на шаге {step}"
+        return f"stance_loss at step {step}"
     if step is not None:
-        return f"сбой на шаге {step}"
-    return "устоял"
+        return f"failure at step {step}"
+    return "survived"
 
 
 def saturation_note(sat: float | None) -> str:
@@ -1185,7 +1185,7 @@ def print_z_deltas(results: list[dict], label_key: str, ref_idx: int = 0) -> boo
         any_diff = any_diff or z_diff >= 1e-9
         print(
             f"  max |Δz| {ref_label} vs {result[label_key]}={z_diff:.6f} "
-            f"(по первым {n} шагам)"
+            f"(over the first {n} steps)"
         )
     return any_diff
 
@@ -1360,10 +1360,10 @@ def value_stats(values: list[float]) -> dict:
 
 def format_stats(stats: dict) -> str:
     if stats["count"] == 0:
-        return "нет данных"
+        return "no data"
     return (
-        f"среднее={stats['mean']:.4f}, "
-        f"диапазон=[{stats['min']:.4f}, {stats['max']:.4f}]"
+        f"mean={stats['mean']:.4f}, "
+        f"range=[{stats['min']:.4f}, {stats['max']:.4f}]"
     )
 
 
@@ -1804,7 +1804,7 @@ def probe_friction_effect(
     lateral_force: float = COM_PROBE_FORCE,
 ) -> None:
     print(
-        f"\nпроверка трения: Fy={lateral_force:.1f} Н на шагах "
+        f"\nfriction probe: Fy={lateral_force:.1f} N on steps "
         f"{IMPULSE_START}..{IMPULSE_END}, friction={list(PROBE_FRICTIONS)}"
     )
     results = [
@@ -1828,7 +1828,7 @@ def probe_friction_effect(
             else "устоял"
         )
         print(
-            f"  mu={result['friction']:.2f}: записано {result['written_sliding']}, "
+            f"  mu={result['friction']:.2f}: written {result['written_sliding']}, "
             f"contact.friction={result['contact_friction']}, {status}, "
             f"z_end={result['z_end']:.4f}, z_min={result['z_min']:.4f}, "
             f"y_end={result['y_end']:.4f}, max|y|={result['max_abs_y']:.4f}"
@@ -1839,11 +1839,11 @@ def probe_friction_effect(
     n = min(len(z0), len(z1))
     z_diff = float(np.max(np.abs(z0[:n] - z1[:n])))
     y_diff = float(np.max(np.abs(y0[:n] - y1[:n])))
-    print(f"  max |Δz|={z_diff:.6f}, max |Δy|={y_diff:.6f} (по первым {n} шагам)")
+    print(f"  max |Δz|={z_diff:.6f}, max |Δy|={y_diff:.6f} (over the first {n} steps)")
     if z_diff < 1e-9 and y_diff < 1e-9:
-        print("  предупреждение: траектории совпали, трение не влияет на контакт")
+        print("  warning: traces match, friction does not affect the contact")
     else:
-        print("  траектории различаются, трение влияет на устойчивость")
+        print("  traces differ, friction affects stability")
 
 
 def probe_com_offset(
@@ -1858,9 +1858,9 @@ def probe_com_offset(
 ) -> None:
     origin = read_body_ipos(model, torso_body_id)
     print(
-        f"\nпроверка смещения COM корпуса: body_id={torso_body_id} "
-        f"body_ipos0={origin.tolist()}  μ={COM_PROBE_FRICTION:g} "
-        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}"
+        f"\ntorso COM offset probe: body_id={torso_body_id} "
+        f"body_ipos0={origin.tolist()}  mu={COM_PROBE_FRICTION:g} "
+        f"Fy={lateral_force:.1f} N on steps {IMPULSE_START}..{IMPULSE_END}"
     )
     results: list[dict] = []
     try:
@@ -1898,7 +1898,7 @@ def probe_com_offset(
                 f"не удалось восстановить body_ipos[{torso_body_id}]={origin.tolist()}, "
                 f"сейчас {restored.tolist()}"
             )
-        print(f"  COM восстановлен: body_ipos={restored.tolist()}")
+        print(f"  COM restored: body_ipos={restored.tolist()}")
 
     if results:
         z0 = np.asarray(results[0]["z"])
@@ -1910,12 +1910,12 @@ def probe_com_offset(
             any_diff = any_diff or z_diff >= 1e-9
             print(
                 f"  max |Δz| zero vs {result['label']}={z_diff:.6f} "
-                f"(по первым {n} шагам)"
+                f"(over the first {n} steps)"
             )
         if not any_diff:
-            print("  предупреждение: траектории совпали, смещение COM не влияет")
+            print("  warning: traces match, COM offset has no effect")
         else:
-            print("  траектории различаются, смещение COM влияет на устойчивость")
+            print("  traces differ, COM offset affects stability")
 
 
 def probe_torque_limit(
@@ -1930,8 +1930,8 @@ def probe_torque_limit(
 ) -> list[dict]:
     origin = stock_ctrlrange(model)
     print(
-        f"\nпроверка ограничения момента: μ={COM_PROBE_FRICTION:g} "
-        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}  "
+        f"\ntorque-limit probe: mu={COM_PROBE_FRICTION:g} "
+        f"Fy={lateral_force:.1f} N on steps {IMPULSE_START}..{IMPULSE_END}  "
         f"ctrlrange0 hip=[{origin[0, 0]:.2f}, {origin[0, 1]:.2f}]  "
         f"ctrllimited={bool(model.actuator_ctrllimited[0])}"
     )
@@ -1967,28 +1967,28 @@ def probe_torque_limit(
                 f"max|ctrl|_raw={result['max_abs_ctrl_raw']:.3f}  "
                 f"max|tau|/limit={result['max_tau_over_limit']:.3f}  "
                 f"sat={format_sat_pct(sat)} ({saturation_note(sat)})  "
-                f"потолок hip={hip_limit:.2f} calf={calf_limit:.2f}  упёрся={hit}"
+                f"ceiling hip={hip_limit:.2f} calf={calf_limit:.2f}  hit={hit}"
             )
     finally:
         restored = apply_torque_limit(model, 1.0)
         if float(np.max(np.abs(restored - origin))) > 1e-12:
             raise RuntimeError("не удалось восстановить actuator_ctrlrange")
         print(
-            f"  ctrlrange восстановлен: hip=[{restored[0, 0]:.2f}, {restored[0, 1]:.2f}]"
+            f"  ctrlrange restored: hip=[{restored[0, 0]:.2f}, {restored[0, 1]:.2f}]"
         )
 
     reduced_hit = [r for r in results if r["scale"] < 1.0 - 1e-12]
     if reduced_hit and not any(r["hit_limit"] for r in reduced_hit):
         print(
-            "  предупреждение: max|ctrl| так и не дошёл до лимита, "
-            "потолок момента на этом сценарии не сработал"
+            "  warning: max|ctrl| never reached the limit, "
+            "the torque ceiling did not engage on this scenario"
         )
     else:
         any_diff = print_z_deltas(results, "label")
         if any_diff:
-            print("  траектории различаются, потолок момента влияет на устойчивость")
+            print("  traces differ, the torque ceiling affects stability")
         elif reduced_hit and any(r["hit_limit"] for r in reduced_hit):
-            print("  потолок сработал (ctrl упёрся в лимит)")
+            print("  ceiling engaged (ctrl hit the limit)")
     return [
         {
             "scale": r["scale"],
@@ -2011,8 +2011,8 @@ def probe_action_delay(
     lateral_force: float = COM_PROBE_FORCE,
 ) -> None:
     print(
-        f"\nпроверка задержки команд (#6): μ={COM_PROBE_FRICTION:g} "
-        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}"
+        f"\ncommand-delay probe (#6): mu={COM_PROBE_FRICTION:g} "
+        f"Fy={lateral_force:.1f} N on steps {IMPULSE_START}..{IMPULSE_END}"
     )
     results: list[dict] = []
     for delay in DELAY_PROBE_STEPS:
@@ -2037,9 +2037,9 @@ def probe_action_delay(
         )
     any_diff = print_z_deltas(results, "label")
     if not any_diff:
-        print("  предупреждение: траектории совпали, задержка команд не влияет")
+        print("  warning: traces match, command delay has no effect")
     else:
-        print("  траектории различаются, задержка команд влияет на устойчивость")
+        print("  traces differ, command delay affects stability")
 
 
 def probe_joint_damping(
@@ -2055,9 +2055,9 @@ def probe_joint_damping(
     origin = read_dof_damping(model)
     legs = leg_dof_ids(model)
     print(
-        f"\nпроверка демпфирования суставов (#7): μ={COM_PROBE_FRICTION:g} "
-        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}  "
-        f"dof_damping ног 1x={origin[legs].tolist()}"
+        f"\njoint-damping probe (#7): mu={COM_PROBE_FRICTION:g} "
+        f"Fy={lateral_force:.1f} N on steps {IMPULSE_START}..{IMPULSE_END}  "
+        f"leg dof_damping 1x={origin[legs].tolist()}"
     )
     results: list[dict] = []
     try:
@@ -2080,7 +2080,7 @@ def probe_joint_damping(
             result["label"] = label
             results.append(result)
             print(
-                f"  {label}: damping_ног={written[legs].tolist()}  "
+                f"  {label}: leg_damping={written[legs].tolist()}  "
                 f"{episode_status(result)}, z_end={result['z_end']:.4f}, "
                 f"z_min={result['z_min']:.4f}"
             )
@@ -2088,13 +2088,13 @@ def probe_joint_damping(
         restored = write_dof_damping(model, origin)
         if float(np.max(np.abs(restored - origin))) > 1e-12:
             raise RuntimeError("не удалось восстановить dof_damping")
-        print(f"  dof_damping восстановлен: ног={restored[legs].tolist()}")
+        print(f"  dof_damping restored: legs={restored[legs].tolist()}")
 
     any_diff = print_z_deltas(results, "label")
     if not any_diff:
-        print("  предупреждение: траектории совпали, демпфирование суставов не влияет")
+        print("  warning: traces match, joint damping has no effect")
     else:
-        print("  траектории различаются, демпфирование суставов влияет на устойчивость")
+        print("  traces differ, joint damping affects stability")
 
 
 def probe_body_inertia(
@@ -2109,9 +2109,9 @@ def probe_body_inertia(
 ) -> None:
     origin = read_body_inertia(model, torso_body_id)
     print(
-        f"\nпроверка инерции корпуса (#8): body_id={torso_body_id} "
-        f"body_inertia0={origin.tolist()}  μ={COM_PROBE_FRICTION:g} "
-        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}"
+        f"\ntorso-inertia probe (#8): body_id={torso_body_id} "
+        f"body_inertia0={origin.tolist()}  mu={COM_PROBE_FRICTION:g} "
+        f"Fy={lateral_force:.1f} N on steps {IMPULSE_START}..{IMPULSE_END}"
     )
     results: list[dict] = []
     try:
@@ -2139,13 +2139,13 @@ def probe_body_inertia(
         restored = write_body_inertia(model, data, torso_body_id, origin)
         if float(np.max(np.abs(restored - origin))) > 1e-12:
             raise RuntimeError("не удалось восстановить body_inertia")
-        print(f"  body_inertia восстановлена: {restored.tolist()}")
+        print(f"  body_inertia restored: {restored.tolist()}")
 
     any_diff = print_z_deltas(results, "label")
     if not any_diff:
-        print("  предупреждение: траектории совпали, инерция корпуса не влияет")
+        print("  warning: traces match, torso inertia has no effect")
     else:
-        print("  траектории различаются, инерция корпуса влияет на устойчивость")
+        print("  traces differ, torso inertia affects stability")
 
 
 def probe_floor_contact(
@@ -2160,10 +2160,10 @@ def probe_floor_contact(
 ) -> None:
     origin_ref, origin_imp = read_geom_contact(model, friction_geoms)
     print(
-        f"\nпроверка контакта пола (#9): geom_ids={friction_geoms} "
+        f"\nfloor-contact probe (#9): geom_ids={friction_geoms} "
         f"solref0={origin_ref[0].tolist()} solimp0={origin_imp[0].tolist()}  "
-        f"μ={COM_PROBE_FRICTION:g} Fy={lateral_force:.1f} Н "
-        f"на шагах {IMPULSE_START}..{IMPULSE_END}"
+        f"mu={COM_PROBE_FRICTION:g} Fy={lateral_force:.1f} N "
+        f"on steps {IMPULSE_START}..{IMPULSE_END}"
     )
     results: list[dict] = []
     try:
@@ -2202,15 +2202,15 @@ def probe_floor_contact(
             model, friction_geoms, origin_ref, origin_imp
         )
         print(
-            f"  контакт восстановлен: solref={restored_ref[0].tolist()} "
+            f"  contact restored: solref={restored_ref[0].tolist()} "
             f"solimp={restored_imp[0].tolist()}"
         )
 
     any_diff = print_z_deltas(results, "label")
     if not any_diff:
-        print("  предупреждение: траектории совпали, мягкость контакта не влияет")
+        print("  warning: traces match, contact softness has no effect")
     else:
-        print("  траектории различаются, мягкость контакта влияет на устойчивость")
+        print("  traces differ, contact softness affects stability")
 
 
 def probe_observation_noise(
@@ -2224,8 +2224,8 @@ def probe_observation_noise(
     lateral_force: float = COM_PROBE_FORCE,
 ) -> None:
     print(
-        f"\nпроверка шума измерений (#10): μ={COM_PROBE_FRICTION:g} "
-        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}  "
+        f"\nmeasurement-noise probe (#10): mu={COM_PROBE_FRICTION:g} "
+        f"Fy={lateral_force:.1f} N on steps {IMPULSE_START}..{IMPULSE_END}  "
         f"seed={SEED}"
     )
     results: list[dict] = []
@@ -2253,9 +2253,9 @@ def probe_observation_noise(
         )
     any_diff = print_z_deltas(results, "label")
     if not any_diff:
-        print("  предупреждение: траектории совпали, шум измерений не влияет")
+        print("  warning: traces match, measurement noise has no effect")
     else:
-        print("  траектории различаются, шум измерений влияет на устойчивость")
+        print("  traces differ, measurement noise affects stability")
 
 
 def probe_sensor_bias(
@@ -2269,8 +2269,8 @@ def probe_sensor_bias(
     lateral_force: float = COM_PROBE_FORCE,
 ) -> None:
     print(
-        f"\nпроверка смещения нуля датчиков: μ={COM_PROBE_FRICTION:g} "
-        f"Fy={lateral_force:.1f} Н на шагах {IMPULSE_START}..{IMPULSE_END}"
+        f"\nsensor-bias probe: mu={COM_PROBE_FRICTION:g} "
+        f"Fy={lateral_force:.1f} N on steps {IMPULSE_START}..{IMPULSE_END}"
     )
     results: list[dict] = []
     for label, bias_q, drift_q in BIAS_PROBE_VARIANTS:
@@ -2296,9 +2296,9 @@ def probe_sensor_bias(
         )
     any_diff = print_z_deltas(results, "label")
     if not any_diff:
-        print("  предупреждение: траектории совпали, смещение нуля датчиков не влияет")
+        print("  warning: traces match, sensor bias has no effect")
     else:
-        print("  траектории различаются, смещение нуля датчиков влияет на устойчивость")
+        print("  traces differ, sensor bias affects stability")
 
 
 def probe_stance_hold(
@@ -2323,7 +2323,7 @@ def probe_stance_hold(
     )
     status = "упал" if result["fail_step"] is not None else "устоял"
     print(
-        f"контроль стойки kp={kp:g} kd={kd:g}: z_start={result['z_start']:.4f} "
+        f"stance check kp={kp:g} kd={kd:g}: z_start={result['z_start']:.4f} "
         f"z_end={result['z_end']:.4f} {status}"
     )
     return result
@@ -2695,11 +2695,11 @@ def run_parameter_sweeps(
         scenario["lateral_force_range"],
     )
     print(
-        f"\nOFAT-проверка параметров: {n_ep} эпизодов на уровень, "
-        f"seed={SEED}, сценарий={scenario['id']}, параллельные воркеры"
+        f"\nOFAT parameter check: {n_ep} episodes per level, "
+        f"seed={SEED}, scenario={scenario['id']}, parallel workers"
     )
     print(
-        "  парный точный Макнемар vs baseline на общих seed; "
+        "  exact paired McNemar vs baseline on shared seeds; "
         f"{HOLM_FAMILY_NOTE}"
     )
     parameters: list[dict] = []
@@ -2734,14 +2734,14 @@ def run_parameter_sweeps(
                 row["p_mcnemar"] = None
                 row["p_holm"] = None
                 row["significant"] = False
-                row["effect_label"] = "норма"
+                row["effect_label"] = "baseline"
             else:
                 mc = mcnemar_exact_paired(baseline["outcomes"], row["outcomes"])
                 row["mcnemar"] = mc
                 row["p_mcnemar"] = mc["pvalue"]
                 row["p_holm"] = None
                 row["significant"] = False
-                row["effect_label"] = "в пределах шума"
+                row["effect_label"] = "within noise"
         parameters.append(
             {
                 "id": spec["id"],
@@ -2761,10 +2761,10 @@ def run_parameter_sweeps(
         row = parameters[pi]["levels"][li]
         row["p_holm"] = padj
         row["significant"] = bool(sig)
-        row["effect_label"] = "значимо" if sig else "в пределах шума"
+        row["effect_label"] = "significant" if sig else "within noise"
     print(
-        f"  Холм: {len(family)} p-значений Макнемара "
-        f"(ненулевые уровни всех факторов vs свой baseline, сценарий {scenario['id']})"
+        f"  Holm: {len(family)} McNemar p-values "
+        f"(non-baseline levels of every factor vs its baseline, scenario {scenario['id']})"
     )
     for param in parameters:
         print(f"  {param['name']} ({param['id']}):")
@@ -2785,11 +2785,11 @@ def run_parameter_sweeps(
                     else row["effect_label"]
                 )
             print(
-                f"    {row['label']}: сбои={row['failure_rate'] * 100:.1f}% "
+                f"    {row['label']}: failures={row['failure_rate'] * 100:.1f}% "
                 f"({row['n_failures']}/{row['n_episodes']}, "
-                f"Уилсон 95% CI[{lo * 100:.1f},{hi * 100:.1f}])  "
-                f"Δ vs норма={row['delta_vs_baseline'] * 100:+.1f} п.п.  "
-                f"{extra}  t={row['elapsed_s']:.2f}с"
+                f"Wilson 95% CI[{lo * 100:.1f},{hi * 100:.1f}])  "
+                f"delta vs baseline={row['delta_vs_baseline'] * 100:+.1f} pp  "
+                f"{extra}  t={row['elapsed_s']:.2f}s"
             )
         param["worst_level"] = worst["id"]
         param["worst_label"] = worst["label"]
@@ -2803,16 +2803,16 @@ def run_parameter_sweeps(
             param["significant_leader_id"] = leader["id"]
             param["significant_leader_label"] = leader["label"]
             print(
-                f"    значимо vs baseline (Холм): "
+                f"    significant vs baseline (Holm): "
                 + ", ".join(
-                    f"{row['label']} (Δ{row['delta_vs_baseline'] * 100:+.1f} п.п.)"
+                    f"{row['label']} (delta {row['delta_vs_baseline'] * 100:+.1f} pp)"
                     for row in sig_rows
                 )
             )
         else:
             param["significant_leader_id"] = None
             param["significant_leader_label"] = None
-            print("    значимых отличий от базы нет (Холм) — сдвиги в пределах шума")
+            print("    no significant difference from baseline (Holm) — shifts are within noise")
     return {
         "n_episodes": n_ep,
         "seed": SEED,
@@ -2892,20 +2892,20 @@ def print_batch_rates(prefix: str, batch: dict) -> None:
     lo, hi = batch.get("failure_rate_ci95") or wilson_ci(k, n)
     slo, shi = batch.get("sag_rate_ci95") or wilson_ci(ks, n)
     reasons = batch.get("fail_reasons") or {}
-    reason_txt = ", ".join(f"{name}={count}" for name, count in sorted(reasons.items())) or "нет"
+    reason_txt = ", ".join(f"{name}={count}" for name, count in sorted(reasons.items())) or "none"
     nt = int(batch.get("n_tilt") or 0)
     ns = int(batch.get("n_stance_loss") or 0)
     print(
-        f"{prefix}сбои={k}/{n}={batch['failure_rate'] * 100:.1f}% "
+        f"{prefix}failures={k}/{n}={batch['failure_rate'] * 100:.1f}% "
         f"CI95[{lo * 100:.1f},{hi * 100:.1f}]  "
         f"fall={nt}/{n}={float(batch.get('fall_rate') or batch.get('tilt_rate') or 0.0) * 100:.1f}%  "
         f"stance_loss={ns}/{n}={float(batch.get('stance_loss_rate') or 0.0) * 100:.1f}%  "
         f"degradation={int(batch.get('n_degradation') or 0)}/{n}="
         f"{float(batch.get('degradation_rate') or 0.0) * 100:.1f}%  "
-        f"просадка z<0.20={ks}/{n}={float(batch.get('sag_rate') or 0.0) * 100:.1f}% "
+        f"sag z<0.20={ks}/{n}={float(batch.get('sag_rate') or 0.0) * 100:.1f}% "
         f"CI95[{slo * 100:.1f},{shi * 100:.1f}]  "
-        f"причины: {reason_txt}"
-        + (f"  t={batch['elapsed_s']:.2f}с" if batch.get("elapsed_s") is not None else "")
+        f"reasons: {reason_txt}"
+        + (f"  t={batch['elapsed_s']:.2f}s" if batch.get("elapsed_s") is not None else "")
     )
 
 
@@ -2971,7 +2971,7 @@ GRID_CSV_FIELDS = [
 
 
 def print_grid_table(rows: list[dict], mus: tuple, fys: tuple, rate_key: str, title: str) -> None:
-    print(f"\n{title} (строки μ, столбцы Fy, %):")
+    print(f"\n{title} (rows mu, columns Fy, %):")
     print("μ\\Fy" + "".join(f"{fy:8.0f}" for fy in fys))
     for mu in mus:
         cells = [
@@ -2996,8 +2996,8 @@ def run_force_mu_grid(
         extra={"grid_mu": list(mus), "grid_fy": list(fys), "n_grid_episodes": n_episodes},
     )
     print(
-        f"\n{title}: {len(mus)}×{len(fys)} узлов, "
-        f"{n_episodes} эпизодов на узел, seed={SEED}, "
+        f"\n{title}: {len(mus)}x{len(fys)} cells, "
+        f"{n_episodes} episodes per cell, seed={SEED}, "
         f"config_hash={meta['config_hash']}"
     )
     rows: list[dict] = []
@@ -3049,14 +3049,14 @@ def measure_stance_reference(
     STANCE_REF["kd"] = float(kd)
     z_lim = float(frac) * z_ref
     print(
-        f"\nэталон стойки: контроллер {ACTIVE_CONTROLLER}, "
-        f"PD kp={kp:g} kd={kd:g}, μ=1 Fy=0, без джиттера\n"
+        f"\nstance reference: controller {ACTIVE_CONTROLLER}, "
+        f"PD kp={kp:g} kd={kd:g}, mu=1 Fy=0, no jitter\n"
         f"  z_start={result['z_start']:.4f} z_end={result['z_end']:.4f} "
-        f"z_ref={z_ref:.4f} м"
+        f"z_ref={z_ref:.4f} m"
     )
     if announce_frac_rule:
         print(
-            f"  stance_loss если z_after_settle < {frac:.2f}×{z_ref:.4f} = {z_lim:.4f} м"
+            f"  stance_loss if z_after_settle < {frac:.2f}x{z_ref:.4f} = {z_lim:.4f} m"
         )
     return z_ref
 
@@ -3070,8 +3070,8 @@ def run_bias_offset_check(target_qpos: np.ndarray, kp: float, kd: float) -> dict
         scenario["lateral_force_range"],
     )
     print(
-        f"\nпроверка смещения нуля +0.05 рад на moderate "
-        f"({N_SWEEP_EPISODES} эпизодов)"
+        f"\nsensor-bias +0.05 rad probe on moderate "
+        f"({N_SWEEP_EPISODES} episodes)"
     )
     base = run_stress_batch_parallel(specs, kp, kd, False, target_qpos)
     biased = run_stress_batch_parallel(
@@ -3090,21 +3090,21 @@ def run_bias_offset_check(target_qpos: np.ndarray, kp: float, kd: float) -> dict
 def run_stance_hold_batch(target_qpos: np.ndarray, kp: float, kd: float) -> dict:
     specs = [(episode, 1.0, 0.0) for episode in range(1, N_STANCE_EPISODES + 1)]
     print(
-        f"\nстойка без толчка: μ=1.0 Fy=0, {N_STANCE_EPISODES} эпизодов, "
+        f"\nstance without a push: mu=1.0 Fy=0, {N_STANCE_EPISODES} episodes, "
         f"kp={kp:g} kd={kd:g} seed={SEED}"
     )
     batch = run_stress_batch_parallel(specs, kp, kd, False, target_qpos)
     print_batch_rates("  ", batch)
     if batch["n_failures"] != 0:
-        print("  предупреждение: стойка при μ=1 Fy=0 не держится по новому критерию")
+        print("  warning: the stance at mu=1 Fy=0 fails the current criterion")
     else:
-        print("  стойка держится по новому критерию: 0 сбоев")
+        print("  stance holds under the current criterion: 0 failures")
     return batch
 
 
 def run_scenario_rate_check(target_qpos: np.ndarray, kp: float, kd: float) -> list[dict]:
     rows: list[dict] = []
-    print("\nдоли сбоев по сценариям (новый критерий vs просадка z<0.20):")
+    print("\nfailure rates by scenario (current criterion vs sag z<0.20):")
     for name in ("nominal", "moderate", "extreme"):
         scenario = SCENARIOS[name]
         specs = generate_episode_specs(
@@ -3127,16 +3127,16 @@ def run_baseline_grid(target_qpos: np.ndarray, kp: float, kd: float) -> list[dic
         target_qpos, kp, kd, GRID_MU, GRID_FY, N_GRID_EPISODES, "сетка Fy/μ"
     )
     write_csv(GRID_PATH, rows, GRID_CSV_FIELDS)
-    print(f"сетка сохранена: {GRID_PATH}")
+    print(f"grid saved: {GRID_PATH}")
     print_grid_table(rows, GRID_MU, GRID_FY, "failure_rate", "доля сбоев (tilt ИЛИ stance_loss)")
     print_grid_table(rows, GRID_MU, GRID_FY, "tilt_rate", "доля tilt")
     print_grid_table(rows, GRID_MU, GRID_FY, "stance_loss_rate", "доля stance_loss")
     print_grid_table(rows, GRID_MU, GRID_FY, "sag_rate", "доля просадки z<0.20 (метрика)")
     unique_rates = {round(float(r["failure_rate"]), 6) for r in rows}
     if unique_rates <= {0.0, 1.0}:
-        print("  предупреждение: все узлы сетки всё ещё 0% или 100%")
+        print("  warning: every grid cell is still 0% or 100%")
     else:
-        print("  узлы сетки не все бинарные 0/100")
+        print("  grid cells are not all binary 0/100")
     write_json(
         GRID_JSON_PATH,
         {
@@ -3156,7 +3156,7 @@ def run_cliff_grid(target_qpos: np.ndarray, kp: float, kd: float) -> list[dict]:
         target_qpos, kp, kd, CLIFF_MU, CLIFF_FY, N_GRID_EPISODES, "тонкая сетка около обрыва"
     )
     write_csv(CLIFF_PATH, rows, GRID_CSV_FIELDS)
-    print(f"тонкая сетка сохранена: {CLIFF_PATH}")
+    print(f"fine grid saved: {CLIFF_PATH}")
     series = []
     for mu in CLIFF_MU:
         subset = [r for r in rows if abs(r["mu"] - mu) < 1e-12]
@@ -3188,7 +3188,7 @@ def run_cliff_grid(target_qpos: np.ndarray, kp: float, kd: float) -> list[dict]:
         y_min=0.0,
         y_max=1.0,
     )
-    print(f"график сохранён: {CLIFF_SVG_PATH}")
+    print(f"plot saved: {CLIFF_SVG_PATH}")
     write_json(
         Path("reports") / "cliff_grid.json",
         {
@@ -3215,7 +3215,7 @@ def run_mu02_traces(
 ) -> dict:
     forces = (0.0, 100.0, 150.0, 200.0, 250.0)
     traces: list[dict] = []
-    print("\nтраектории μ=0.2: z(t) и крен для Fy=0/100/150/200/250")
+    print("\ntraces at mu=0.2: z(t) and roll for Fy=0/100/150/200/250")
     for fy in forces:
         for episode in range(1, N_TRACE_EPISODES + 1):
             result = simulate_episode(
@@ -3397,7 +3397,7 @@ def run_sag_compare(
             "factor": {"kind": "pd_variant", "ctrl": {"keyframe_ff": True}},
         },
     )
-    print("\nсравнение вариантов стойки (PD по умолчанию не меняется):")
+    print("\nstance-variant comparison (default PD is unchanged):")
     rows: list[dict] = []
     for variant in variants:
         physics = measure_stance_physics(
@@ -3414,7 +3414,7 @@ def run_sag_compare(
         print(
             f"  {variant['id']}: z {physics['z_start']:.4f}→{physics['z_end']:.4f} "
             f"min_z={physics['min_z']:.4f} |roll|={physics['max_abs_roll_deg']:.2f}° "
-            f"|qfrc_bias|={physics['qfrc_bias_abs_mean']:.3f} Н·м"
+            f"|qfrc_bias|={physics['qfrc_bias_abs_mean']:.3f} N*m"
         )
         scenario_rates = {}
         for name in ("nominal", "moderate"):
@@ -3497,7 +3497,7 @@ def compare_ofat_sweeps(sweeps: list[dict]) -> None:
     by_id = {item["scenario"]: item for item in sweeps}
     if "nominal" not in by_id or "moderate" not in by_id:
         return
-    print("\nсравнение OFAT: nominal (контроль) vs moderate (чувствительность)")
+    print("\nOFAT comparison: nominal (control) vs moderate (sensitivity)")
     nom_params = {p["id"]: p for p in by_id["nominal"]["parameters"]}
     for param in by_id["moderate"]["parameters"]:
         left = nom_params.get(param["id"])
@@ -3506,14 +3506,14 @@ def compare_ofat_sweeps(sweeps: list[dict]) -> None:
         nom_sig = left.get("significant_leader_label") or "нет значимых"
         mod_sig = param.get("significant_leader_label") or "нет значимых"
         print(
-            f"  {param['name']}: nominal худший {left['worst_label']} "
+            f"  {param['name']}: nominal worst {left['worst_label']} "
             f"{left['worst_failure_rate'] * 100:.1f}% "
-            f"(Δ{left['worst_delta_vs_baseline'] * 100:+.1f}, "
-            f"Холм: {nom_sig}); "
-            f"moderate худший {param['worst_label']} "
+            f"(delta {left['worst_delta_vs_baseline'] * 100:+.1f}, "
+            f"Holm: {nom_sig}); "
+            f"moderate worst {param['worst_label']} "
             f"{param['worst_failure_rate'] * 100:.1f}% "
-            f"(Δ{param['worst_delta_vs_baseline'] * 100:+.1f}, "
-            f"Холм: {mod_sig})"
+            f"(delta {param['worst_delta_vs_baseline'] * 100:+.1f}, "
+            f"Holm: {mod_sig})"
         )
 
 
@@ -3535,7 +3535,7 @@ def save_report(report: dict) -> None:
         json.dumps(merged, ensure_ascii=False, indent=2, default=str),
         encoding="utf-8",
     )
-    print(f"результаты сохранены: {REPORT_PATH}")
+    print(f"results saved: {REPORT_PATH}")
 
 
 def run_single_probes(
@@ -3586,7 +3586,7 @@ def run_pd_comparison(
     specs: list[tuple[int, float, float]],
     pd_name: str,
 ) -> dict:
-    print("\nсравнение PD (стойка: μ=0.8, Fy=0; батч на тех же эпизодах):")
+    print("\nPD comparison (stance: mu=0.8, Fy=0; batch on the same episodes):")
     main_batch = None
     compare_names = ("baseline", "weak_pd")
     for name in compare_names:
@@ -3609,11 +3609,11 @@ def run_pd_comparison(
         print(
             f"  {name}: kp={kp:g} kd={kd:g}  "
             f"z_end={stance['z_end']:.4f}  "
-            f"сбои={batch['failure_rate'] * 100:.1f}% "
+            f"failures={batch['failure_rate'] * 100:.1f}% "
             f"({batch['n_failures']}/{batch['n_episodes']})  "
-            f"до шага {IMPULSE_START}: {batch['n_before_impact']}  "
-            f"при/после {IMPULSE_START}: {batch['n_at_or_after_impact']}  "
-            f"время={batch['elapsed_s']:.2f}с  "
+            f"before step {IMPULSE_START}: {batch['n_before_impact']}  "
+            f"at/after {IMPULSE_START}: {batch['n_at_or_after_impact']}  "
+            f"time={batch['elapsed_s']:.2f}s  "
             f"workers={batch['n_workers']} chunks={batch['n_chunks']}"
         )
         if keep_windows:
@@ -3625,7 +3625,7 @@ def run_pd_comparison(
 
 def main_batch_heading(controller: str, pd_name: str, kp: float, kd: float) -> str:
     return (
-        f"основной прогон (контроллер {controller}, "
+        f"main run (controller {controller}, "
         f"PD {pd_name}, kp={kp:g}, kd={kd:g}):"
     )
 
@@ -3670,22 +3670,22 @@ def print_main_batch_summary(
         z_ref = stance.get("z_ref")
         z_thr = stance.get("z_threshold")
         slip = stance.get("slip_threshold")
-        z_txt = f"{float(z_ref):.4f} м" if z_ref is not None else "нет"
-        thr_txt = f"z<{float(z_thr):.4f} м" if z_thr is not None else "z нет"
-        slip_txt = f"slip>{float(slip):.4f} м" if slip is not None else "slip нет"
-        print(f"эталон z_ref={z_txt}  порог stance_loss: {thr_txt}  {slip_txt}")
-    print(f"всего прогонов: {batch['n_episodes']}  seed={SEED}")
+        z_txt = f"{float(z_ref):.4f} m" if z_ref is not None else "n/a"
+        thr_txt = f"z<{float(z_thr):.4f} m" if z_thr is not None else "z n/a"
+        slip_txt = f"slip>{float(slip):.4f} m" if slip is not None else "slip n/a"
+        print(f"reference z_ref={z_txt}  stance_loss threshold: {thr_txt}  {slip_txt}")
+    print(f"episodes: {batch['n_episodes']}  seed={SEED}")
     print(
-        f"параллельно: {batch['n_workers']} workers, "
-        f"{batch['n_chunks']} chunks, время={batch['elapsed_s']:.2f}с"
+        f"parallel: {batch['n_workers']} workers, "
+        f"{batch['n_chunks']} chunks, time={batch['elapsed_s']:.2f}s"
     )
-    print(f"упало (новый критерий): {batch['n_failures']}")
-    print(f"устояло: {batch['n_survived']}")
+    print(f"failed (current criterion): {batch['n_failures']}")
+    print(f"survived: {batch['n_survived']}")
     print_batch_rates("  ", batch)
-    print(f"упавшие, трение: {format_stats(failed_friction_stats)}")
-    print(f"упавшие, боковая сила: {format_stats(failed_force_stats)}")
-    print(f"устоявшие, трение: {format_stats(survived_friction_stats)}")
-    print(f"устоявшие, боковая сила: {format_stats(survived_force_stats)}")
+    print(f"failed, friction: {format_stats(failed_friction_stats)}")
+    print(f"failed, lateral force: {format_stats(failed_force_stats)}")
+    print(f"survived, friction: {format_stats(survived_friction_stats)}")
+    print(f"survived, lateral force: {format_stats(survived_force_stats)}")
 
 
 def report_from_batch(
@@ -3818,8 +3818,8 @@ def run_gravity_ff_diagnosis(
     kd: float,
 ) -> dict:
     n_steps = int(round(1.5 / max(float(model.opt.timestep), 1e-9)))
-    print("\nдиагностика gravity feed-forward")
-    print("соответствие актуатор → сустав → dof:")
+    print("\ngravity feed-forward diagnosis")
+    print("actuator -> joint -> dof:")
     mapping = actuator_joint_rows(model)
     print(
         f"{'act':>3} {'name':<14} {'joint':<16} {'jid':>3} {'dof':>3} {'gear':>6}"
@@ -3846,7 +3846,7 @@ def run_gravity_ff_diagnosis(
         snapshots.append(snap)
         print(
             f"\n{mode}: z {snap['z_start']:.4f}→{snap['z_end']:.4f}  "
-            f"|qerr|={snap['qerr_abs_mean']:.4f} рад  "
+            f"|qerr|={snap['qerr_abs_mean']:.4f} rad  "
             f"|bias_legs| start mean={snap['bias_abs_mean_start_legs']:.3f} "
             f"max={snap['bias_abs_max_start_legs']:.3f}  "
             f"settled mean={snap['bias_abs_mean_settled_legs']:.3f} "
@@ -3856,7 +3856,7 @@ def run_gravity_ff_diagnosis(
         )
         if mode == "none":
             print(
-                f"{'joint':<16} {'dof':>3} {'tau_act':>10} {'tau_bias':>10} {'отн.ошибка':>10}"
+                f"{'joint':<16} {'dof':>3} {'tau_act':>10} {'tau_bias':>10} {'rel.error':>10}"
             )
             for j in snap["joints"]:
                 print(
@@ -3867,18 +3867,18 @@ def run_gravity_ff_diagnosis(
     none, legacy, mapped = snapshots
     lift = mapped["z_end"] - none["z_end"]
     print(
-        f"\nвысота settled: none={none['z_end']:.4f}  "
+        f"\nsettled height: none={none['z_end']:.4f}  "
         f"legacy={legacy['z_end']:.4f}  mapped={mapped['z_end']:.4f}  "
-        f"Δ mapped−none={lift:+.4f} м"
+        f"delta mapped-none={lift:+.4f} m"
     )
     if lift > 0.005:
         print(
-            "FF с маппингом актуатор→dof поднимает стойку. "
-            "Предложение: сделать PD+gravity_ff базовым контроллером. "
-            "Не включаю без решения."
+            "Mapped actuator->dof FF lifts the stance. "
+            "Proposal: make PD+gravity_ff the default controller. "
+            "Left off until that is decided."
         )
     else:
-        print("mapped FF не дал заметного подъёма (>5 мм). Базовый PD без FF.")
+        print("mapped FF did not lift the stance by more than 5 mm. Baseline PD stays without FF.")
     payload = {
         "kp": kp,
         "kd": kd,
@@ -4142,11 +4142,11 @@ def run_criteria_analysis(
     kd: float,
 ) -> dict:
     z_ref = float(STANCE_REF["z"] or 0.0)
-    print("\nкритерий сбоя: fail = fall OR stance_loss")
-    print("  fall: |крен| или |тангаж| > 45° либо касание корпусом пола (z < 0.12 м)")
-    print("  stance_loss: z_settle или slip (лапы относительно корпуса) за порогами nominal")
-    print("  degradation не используется: −3% от z_ref лежит внутри порога stance_loss")
-    print(f"\nкалибровка stance_loss: {N_THRESHOLD_EPISODES} nominal эпизодов")
+    print("\nfailure criterion: fail = fall OR stance_loss")
+    print("  fall: |roll| or |pitch| > 45 deg, or torso contact with the floor (z < 0.12 m)")
+    print("  stance_loss: z_settle or slip (feet relative to the torso) beyond the nominal thresholds")
+    print("  degradation is unused: -3% of z_ref sits inside the stance_loss threshold")
+    print(f"\nstance_loss calibration: {N_THRESHOLD_EPISODES} nominal episodes")
     STANCE_THRESH["z_threshold"] = None
     STANCE_THRESH["slip_threshold"] = None
     specs = generate_episode_specs(
@@ -4161,11 +4161,11 @@ def run_criteria_analysis(
     nom_counts = outcome_counts(nom["episodes"])
     print(
         f"  z_settle min={derivation['z_settle_min']:.4f} σ={derivation['z_settle_std']:.4f} "
-        f"порог={derivation['z_threshold']:.4f}"
+        f"threshold={derivation['z_threshold']:.4f}"
     )
     print(
         f"  slip max={derivation['slip_max']:.4f} σ={derivation['slip_std']:.4f} "
-        f"порог={derivation['slip_threshold']:.4f}"
+        f"threshold={derivation['slip_threshold']:.4f}"
     )
     print_criteria_rates("  nominal после порога: ", nom_counts)
     write_json(THRESHOLDS_PATH, derivation)
@@ -4205,7 +4205,7 @@ def run_criteria_analysis(
     series = []
     names = ["nominal", "ice_mu0.1_fy0", "ice_mu0.1_fy100", "ice_mu0.1_fy200",
              "ice_mu0.2_fy0", "ice_mu0.2_fy100", "ice_mu0.2_fy200", "bias_0.05"]
-    print("\nдиагностика порога по z (не критерий сбоя): fall ИЛИ z_settle < frac·z_ref")
+    print("\nz-threshold diagnosis (not the failure criterion): fall OR z_settle < frac*z_ref")
     header = "frac  " + "  ".join(f"{n:>16}" for n in names)
     print(header)
     for frac in fracs:
@@ -4230,8 +4230,8 @@ def run_criteria_analysis(
             last_nominal_zero = row["frac"]
     if plateau is not None:
         print(
-            f"плато z-критерия: nominal=0 и лёд=0 до frac={plateau:.2f}; "
-            f"nominal=0 до frac={last_nominal_zero:.2f}"
+            f"z-criterion plateau: nominal=0 and ice=0 up to frac={plateau:.2f}; "
+            f"nominal=0 up to frac={last_nominal_zero:.2f}"
         )
     for name, color in (
         ("nominal", "#1f4e79"),
@@ -4307,7 +4307,7 @@ def run_ice_nonmonotonic_traces(
 ) -> dict:
     foot_ids = find_foot_geom_ids(model)
     forces = (150.0, 250.0, 350.0)
-    print("\nдиагностика μ=0.2: z, крен, лапы/корпус, скорость при Fy=150/250/350")
+    print("\nmu=0.2 diagnosis: z, roll, feet/torso, speed at Fy=150/250/350")
     traces = []
     for fy in forces:
         for ep in range(1, 4):
@@ -4448,7 +4448,7 @@ def fy_crit_search(
         )
         p = float(np.mean(flags))
         probes.append({"fy": mid, "p": p, "flags": flags})
-        print(f"    iter {i+1}: |Fy|={mid:.2f} Н  p_fall={p*100:.1f}%")
+        print(f"    iter {i+1}: |Fy|={mid:.2f} N  p_fall={p*100:.1f}%")
         if p < p_target:
             lo = mid
         else:
@@ -4487,33 +4487,33 @@ def run_fycrit_ofat(
     kp: float,
     kd: float,
 ) -> dict:
-    print("\nширина перехода до реалистичного импульса (сила вдоль Y)")
+    print("\ntransition width before a realistic impulse (force along Y)")
     IMPULSE_CFG["realistic"] = False
     before_10 = fy_crit_search(target_qpos, kp, kd, p_target=0.1)
     before_50 = fy_crit_search(target_qpos, kp, kd, p_target=0.5)
     before_90 = fy_crit_search(target_qpos, kp, kd, p_target=0.9)
     width_before = before_90["fy_crit"] - before_10["fy_crit"]
     print(
-        f"  до: Fy10={before_10['fy_crit']:.1f} Fy50={before_50['fy_crit']:.1f} "
-        f"Fy90={before_90['fy_crit']:.1f} ширина={width_before:.1f} Н"
+        f"  before: Fy10={before_10['fy_crit']:.1f} Fy50={before_50['fy_crit']:.1f} "
+        f"Fy90={before_90['fy_crit']:.1f} width={width_before:.1f} N"
     )
-    print("\nреалистичный импульс: случайное направление, высота ±3 см, длительность ±20%")
+    print("\nrealistic impulse: random direction, height +/-3 cm, duration +/-20%")
     IMPULSE_CFG["realistic"] = True
     after_10 = fy_crit_search(target_qpos, kp, kd, p_target=0.1)
     after_50 = fy_crit_search(target_qpos, kp, kd, p_target=0.5)
     after_90 = fy_crit_search(target_qpos, kp, kd, p_target=0.9)
     width_after = after_90["fy_crit"] - after_10["fy_crit"]
     print(
-        f"  после: Fy10={after_10['fy_crit']:.1f} Fy50={after_50['fy_crit']:.1f} "
-        f"Fy90={after_90['fy_crit']:.1f} ширина={width_after:.1f} Н"
+        f"  after: Fy10={after_10['fy_crit']:.1f} Fy50={after_50['fy_crit']:.1f} "
+        f"Fy90={after_90['fy_crit']:.1f} width={width_after:.1f} N"
     )
     base = after_50
-    print("\nOFAT Fy_crit, база μ=0.8, реалистичный импульс")
+    print("\nOFAT Fy_crit, baseline mu=0.8, realistic impulse")
     parameters = []
     no_effect = []
     for spec in PARAMETER_SWEEPS:
         if spec["id"] == "torque_limit":
-            print("  torque_limit: пропущен (не трогаем на этом шаге)")
+            print("  torque_limit: skipped (left unchanged on this step)")
             continue
         print(f"  {spec['name']}:")
         levels_out = []
@@ -4538,11 +4538,11 @@ def run_fycrit_ofat(
                 "ci_overlap_with_base": overlap,
             }
             levels_out.append(row)
-            mark = "значимо" if significant else "в пределах шума"
+            mark = "significant" if significant else "within noise"
             print(
-                f"    {level['label']}: Fy_crit={est['fy_crit']:.1f} Н "
+                f"    {level['label']}: Fy_crit={est['fy_crit']:.1f} N "
                 f"CI[{est['ci95'][0]:.1f},{est['ci95'][1]:.1f}] "
-                f"Δ={delta:+.1f} Н ({pct:+.1f}%) {mark}"
+                f"delta={delta:+.1f} N ({pct:+.1f}%) {mark}"
             )
         baseline_level = next(
             (lv for lv in levels_out if lv["id"] == spec["baseline"]), levels_out[0]
@@ -4581,7 +4581,7 @@ def run_fycrit_ofat(
         "no_significant_effect": no_effect,
     }
     write_json(FYCRIT_PATH, payload)
-    print("без значимого эффекта:", ", ".join(no_effect) or "нет")
+    print("no significant effect:", ", ".join(no_effect) or "none")
     IMPULSE_CFG["realistic"] = False
     return payload
 
@@ -4608,8 +4608,8 @@ def run_pd_ff_variant(
     kd: float,
 ) -> dict:
     tau = compute_contact_ff(model, data, friction_geoms)
-    print("\nвариант pd_ff: tau_ff = qfrc_bias − qfrc_constraint (dof ног), база не меняется")
-    print(f"  |tau_ff| mean={float(np.mean(np.abs(tau))):.3f} max={float(np.max(np.abs(tau))):.3f} Н·м")
+    print("\npd_ff variant: tau_ff = qfrc_bias - qfrc_constraint (leg dofs), baseline unchanged")
+    print(f"  |tau_ff| mean={float(np.mean(np.abs(tau))):.3f} max={float(np.max(np.abs(tau))):.3f} N*m")
     hold = hold_stance_for_ff(
         model, data, target_qpos, friction_geoms, torso_body_id, kp, kd, 750, "none"
     )
@@ -4620,7 +4620,7 @@ def run_pd_ff_variant(
         apply_pd(model, data, target_qpos, kp=kp, kd=kd, gravity_ff=False, ff_ctrl=tau)
         mujoco.mj_step(model, data)
     z_ff = float(data.qpos[2])
-    print(f"  высота базы={hold['z_end']:.4f}  pd_ff={z_ff:.4f}")
+    print(f"  baseline height={hold['z_end']:.4f}  pd_ff={z_ff:.4f}")
     factor = {"kind": "pd_variant", "ctrl": {"ff_ctrl": tau.tolist()}}
     IMPULSE_CFG["realistic"] = True
     base_crit = fy_crit_search(target_qpos, kp, kd, p_target=0.5)
@@ -4640,15 +4640,15 @@ def run_pd_ff_variant(
     }
     write_json(Path("reports") / "pd_ff_compare.json", payload)
     print(
-        f"  Fy_crit база={base_crit['fy_crit']:.1f} "
-        f"pd_ff={ff_crit['fy_crit']:.1f} Н"
+        f"  Fy_crit baseline={base_crit['fy_crit']:.1f} "
+        f"pd_ff={ff_crit['fy_crit']:.1f} N"
     )
     return payload
 
 
 def load_outcome_thresholds() -> dict | None:
     if not THRESHOLDS_PATH.exists():
-        print(f"нет {THRESHOLDS_PATH}, stance_loss без калибровки 3σ")
+        print(f"missing {THRESHOLDS_PATH}, stance_loss has no 3-sigma calibration")
         return None
     derivation = json.loads(THRESHOLDS_PATH.read_text(encoding="utf-8"))
     STANCE_THRESH.update(
@@ -4662,8 +4662,8 @@ def load_outcome_thresholds() -> dict | None:
     )
     STANCE_REF["z"] = float(derivation["z_ref"])
     print(
-        f"пороги stance_loss из {THRESHOLDS_PATH}: "
-        f"z<{derivation['z_threshold']:.4f} м  slip>{derivation['slip_threshold']:.4f} м"
+        f"stance_loss thresholds from {THRESHOLDS_PATH}: "
+        f"z<{derivation['z_threshold']:.4f} m  slip>{derivation['slip_threshold']:.4f} m"
     )
     return derivation
 
@@ -4750,9 +4750,9 @@ def run_torque_limit_test(
     kd: float,
 ) -> dict:
     stock = stock_ctrlrange(model)
-    print("\nпроверка torque_limit: клип ctrl к actuator_ctrlrange, ctrllimited=1")
+    print("\ntorque_limit check: clip ctrl to actuator_ctrlrange, ctrllimited=1")
     print(
-        f"  штатный ctrlrange hip=[{stock[0, 0]:.2f},{stock[0, 1]:.2f}] "
+        f"  stock ctrlrange hip=[{stock[0, 0]:.2f},{stock[0, 1]:.2f}] "
         f"calf=[{stock[2, 0]:.2f},{stock[2, 1]:.2f}]  "
         f"ctrllimited={bool(np.all(model.actuator_ctrllimited))}"
     )
@@ -4767,8 +4767,8 @@ def run_torque_limit_test(
         SCENARIOS["nominal"]["lateral_force_range"],
     )
     print(
-        f"\nбатч torque_limit: {N_TORQUE_EPISODES} nominal эпизодов, "
-        f"общие seed, шкалы {list(TORQUE_TEST_SCALES)}"
+        f"\ntorque_limit batch: {N_TORQUE_EPISODES} nominal episodes, "
+        f"shared seeds, scales {list(TORQUE_TEST_SCALES)}"
     )
     levels = []
     for scale in TORQUE_TEST_SCALES:
@@ -4792,8 +4792,8 @@ def run_torque_limit_test(
         tau = row["max_tau_over_limit_mean"]
         sat = row["saturation_frac_mean"]
         print(
-            f"  {row['label']:>4}  hip_lim={abs(written[0, 0]):.2f} Н·м  "
-            f"calf_lim={abs(written[2, 0]):.2f} Н·м  "
+            f"  {row['label']:>4}  hip_lim={abs(written[0, 0]):.2f} N*m  "
+            f"calf_lim={abs(written[2, 0]):.2f} N*m  "
             f"max|tau|/limit={0.0 if tau is None else tau:.3f}  "
             f"sat={format_sat_pct(sat)} ({row['limit_note']})  "
             f"fail={row['n_fail']}/{row['n']}={row['fail_rate']*100:.1f}%  "
@@ -4810,9 +4810,9 @@ def run_torque_limit_test(
         or abs((harsh["z_settle_mean"] or 0.0) - (base["z_settle_mean"] or 0.0)) > 0.005
     )
     if changed:
-        print("  5% меняет насыщение и/или сбои относительно 100%")
+        print("  5% changes saturation and/or failures relative to 100%")
     else:
-        print("  предупреждение: 5% не отличился от 100% по fail/sat/z")
+        print("  warning: 5% did not differ from 100% on fail/sat/z")
     payload = {
         "kp": kp,
         "kd": kd,
@@ -4861,17 +4861,17 @@ def main() -> None:
     friction_geoms = [floor_id] + [geom_id for geom_id in foot_ids if geom_id != floor_id]
     print_floor_selection(model, floor_id, foot_ids)
     print(
-        f"корпус для импульса: id={torso_body_id} name={torso_name!r} "
-        f"xfrc_applied[:, 1], шаги {IMPULSE_START}..{IMPULSE_END}"
+        f"impulse body: id={torso_body_id} name={torso_name!r} "
+        f"xfrc_applied[:, 1], steps {IMPULSE_START}..{IMPULSE_END}"
     )
-    print(f"режим прогона: {run_mode}")
-    print(f"сценарий: {scenario['id']} — {scenario['label']}")
+    print(f"run mode: {run_mode}")
+    print(f"scenario: {scenario['id']} — {scenario['label']}")
     print(
-        f"  Fy диапазон={list(scenario['lateral_force_range'])}, "
-        f"проба Fy={scenario['probe_force']:.1f} Н"
+        f"  Fy range={list(scenario['lateral_force_range'])}, "
+        f"probe Fy={scenario['probe_force']:.1f} N"
     )
-    print(f"основной PD: {pd_name} kp={main_kp:g} kd={main_kd:g}")
-    print(f"контроллер: {ACTIVE_CONTROLLER}")
+    print(f"main PD: {pd_name} kp={main_kp:g} kd={main_kd:g}")
+    print(f"controller: {ACTIVE_CONTROLLER}")
     n_episodes = max(1, int(args.episodes))
     print(
         f"seed={SEED}  N_ENVS={N_ENVS}  CHUNK_SIZE={CHUNK_SIZE}  "
@@ -4984,7 +4984,7 @@ def main() -> None:
             **config_meta,
         }
         write_json(GRID_JSON_PATH, report)
-        print("grid не перезаписывает reports/batch_failures.json")
+        print("grid does not overwrite reports/batch_failures.json")
         return
     if run_mode == "sag":
         rows = run_sag_compare(
@@ -5000,7 +5000,7 @@ def main() -> None:
                 "rows": rows,
             },
         )
-        print("sag не перезаписывает reports/batch_failures.json")
+        print("sag does not overwrite reports/batch_failures.json")
         return
     if run_mode == "full":
         run_single_probes(
@@ -5014,9 +5014,9 @@ def main() -> None:
             lateral_force=float(scenario["probe_force"]),
         )
     elif run_mode == "quick":
-        print("\nбыстрый прогон: только основной батч, без проб и OFAT")
+        print("\nquick run: main batch only, no probes and no OFAT")
     else:
-        print("\nOFAT-прогон: параллельная проверка параметров, основной батч пропущен")
+        print("\nOFAT run: parallel parameter check, main batch skipped")
 
     episode_specs_kwargs = {
         "friction_range": scenario["friction_range"],
@@ -5051,8 +5051,8 @@ def main() -> None:
         for ofat_scenario in ofat_scenarios:
             if ofat_scenario["id"] != scenario["id"]:
                 print(
-                    f"OFAT от сценария {ofat_scenario['id']} "
-                    f"({ofat_scenario['label']}), не от {scenario['id']}"
+                    f"OFAT from scenario {ofat_scenario['id']} "
+                    f"({ofat_scenario['label']}), not from {scenario['id']}"
                 )
             one = run_parameter_sweeps(
                 target_qpos, main_kp, main_kd, ofat_scenario, n_episodes=n_episodes

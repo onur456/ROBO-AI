@@ -1,4 +1,4 @@
-"""Переключение контроллера меняет команду и исход на том же seed."""
+"""Switching the controller changes the command and the outcome on the same seed."""
 
 from __future__ import annotations
 
@@ -367,13 +367,13 @@ class ControllerSwitchTest(unittest.TestCase):
 
             with self.assertRaises(ValueError) as missing_file:
                 make_controller(str(folder / "no_such_controller.py") + ":ExternalShift", 1, 1)
-            self.assertIn("не найден", str(missing_file.exception))
+            self.assertIn("not found", str(missing_file.exception))
             with self.assertRaises(ValueError) as missing_attr:
                 make_controller(f"{path}:NoSuchCtrl", self.kp, self.kd)
-            self.assertIn("нет атрибута", str(missing_attr.exception))
+            self.assertIn("no attribute", str(missing_attr.exception))
             with self.assertRaises(ValueError) as broken:
                 make_controller("not-a-controller", self.kp, self.kd)
-            self.assertIn("некорректный спецификатор", str(broken.exception))
+            self.assertIn("invalid controller spec", str(broken.exception))
 
             bad = make_controller(f"{path}:bad_cmd", self.kp, self.kd)
             s3.reset_to_stance(self.model, self.data)
@@ -390,7 +390,7 @@ class ControllerSwitchTest(unittest.TestCase):
                     0.0,
                     0.0,
                 )
-            self.assertIn("ожидается", str(bad_vec.exception))
+            self.assertIn("expected", str(bad_vec.exception))
             self.assertIn(str(int(self.model.nu)), str(bad_vec.exception))
 
             common = dict(episode=4, jitter=True, keep_window=False, record_trace=False)
@@ -647,12 +647,12 @@ class ControllerSwitchTest(unittest.TestCase):
 
                 with self.assertRaises(ValueError) as missing_mod:
                     make_controller("no_such_ext_mod_zz:ExternalShift", self.kp, self.kd)
-                self.assertIn("не найден", str(missing_mod.exception))
+                self.assertIn("not found", str(missing_mod.exception))
                 sys.path.insert(0, str(folder))
                 try:
                     with self.assertRaises(ValueError) as missing_attr:
                         prepare_controller_spec("ext_batch_mod:NoSuchCtrl")
-                    self.assertIn("нет атрибута", str(missing_attr.exception))
+                    self.assertIn("no attribute", str(missing_attr.exception))
                 finally:
                     while str(folder) in sys.path:
                         sys.path.remove(str(folder))

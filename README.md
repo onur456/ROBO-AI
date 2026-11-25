@@ -1,73 +1,73 @@
 # Robo AI
 
-Robo AI — платформа для стресс-тестирования контроллеров роботов в MuJoCo до выхода на реальное железо. Она гоняет стойку по сетке трения, ударов и возмущений, фиксирует сбои и показывает, какой параметр их вызывает. Инженер видит не только долю падений, но и может воспроизвести конкретный эпизод и сравнить два прогона.
+Robo AI stress-tests robot controllers in MuJoCo before they reach real hardware. It holds a stance across a grid of friction, impacts, and disturbances, records failures, and shows which parameter causes them. An engineer sees the failure rate and can replay one episode or compare two runs.
 
-## Основные возможности
+## Capabilities
 
-- Параллельные симуляции батча: эпизоды считаются чанками в нескольких процессах.
-- Статистика устойчивости: доля сбоев с 95% доверительным интервалом Уилсона, парный тест Макнемара и поправка Холма.
-- Воспроизведение сбоя по `seed`: карточка эпизода собирает команду для повторного прогона.
-- Сравнение A/B двух JSON на общих `seed`: дискордантные пары `0->1` и `1->0`, дельта в процентных пунктах и вердикт после Холма.
-- Сменный контроллер: штатный PD и внешний модуль проходят через одни и те же обёртки шума, задержки и ограничения момента.
+- Parallel batch simulation: episodes run in chunks across several processes.
+- Stability statistics: failure rate with a 95% Wilson confidence interval, a paired McNemar test, and a Holm correction.
+- Failure replay by `seed`: the episode card builds a command for a repeat run.
+- A/B comparison of two JSON files on shared `seed`s: discordant pairs `0->1` and `1->0`, the delta in percentage points, and a verdict after Holm.
+- A swappable controller: the built-in PD and an external module pass through the same noise, delay, and torque-limit wrappers.
 
-## Установка (Installation)
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Быстрый старт (Quick Start)
+## Quick Start
 
-Стресс-тест пишет основной батч в `reports/batch_failures.json`:
+The stress test writes the main batch to `reports/batch_failures.json`:
 
 ```bash
 python step3_batch_stress.py --mode quick
 ```
 
-Дашборд открывается той же командой, путь к отчёту подставляется в сайдбар:
+The dashboard starts with the same command. The report path is filled into the sidebar:
 
 ```bash
 python run_dashboard.py --report reports/batch_failures.json
 ```
 
-## Дашборд
+## Dashboard
 
-Главный экран собирает батч в одну картину: сколько эпизодов прошло, какая доля упала и где именно контроллер теряет стойку. Фильтры в сайдбаре сразу пересчитывают метрики, графики и таблицу.
+The main screen puts the batch in one view: how many episodes ran, what share failed, and where the controller loses the stance. Sidebar filters recompute the metrics, charts, and table immediately.
 
-![Главный экран](docs/screenshot_main.png)
+![Main screen](docs/screenshot_main.png)
 
-Бар-чарт показывает, какой параметр даёт больше всего падений. Рядом — доля с 95% интервалом Уилсона, чтобы единичный сбой не выглядел как системная проблема.
+The bar chart shows which parameter produces the most failures. Next to it is the rate with a 95% Wilson interval, so a single failure does not look like a systematic problem.
 
-Тепловая карта раскладывает ту же долю по уровням параметра. Зелёная ячейка — уровень держит стойку, красная — уровень, с которого стоит начинать разбор.
+The heatmap lays the same rate out by parameter level. A green cell holds the stance. A red cell is the level to inspect first.
 
-![Тепловая карта](docs/screenshot_heatmap.png)
+![Heatmap](docs/screenshot_heatmap.png)
 
-Таблица внизу — сырые эпизоды: `seed`, параметр, уровень и причина сбоя. Из неё инженер переходит к конкретному прогону, не теряя контекст всего батча.
+The table at the bottom is the raw episodes: `seed`, parameter, level, and failure reason. From there an engineer opens one run without losing the rest of the batch.
 
-![Таблица данных](docs/screenshot_table.png)
+![Data table](docs/screenshot_table.png)
 
-### Воспроизведение сбоев (Reproducibility)
+### Reproducibility
 
-Карточка эпизода открывает выбранный `seed`: параметр, уровень, флаг `failed` и причину. Рядом лежит команда, которую можно скопировать в терминал.
+The episode card opens the selected `seed`: parameter, level, the `failed` flag, and the reason. Next to it is a command that can be copied into a terminal.
 
-![Карточка эпизода](docs/screenshot_episode.png)
+![Episode card](docs/screenshot_episode.png)
 
-Дашборд автоматически генерирует точную CLI-команду для локального запуска упавшего эпизода, позволяя инженеру мгновенно воспроизвести и отладить баг.
+The dashboard builds the exact CLI command for a local rerun of the failed episode, so an engineer can reproduce and debug it immediately.
 
-### Сравнение A/B и статистика
+### A/B comparison and statistics
 
-Два отчёта, «до» и «после», сравниваются только на общих `seed`. В таблице видно, сколько пар стало хуже (`0->1`), сколько лучше (`1->0`) и какова дельта в процентных пунктах. Если `z_ref` или набор `seed` разошлись, сравнение честно предупреждает об этом.
+Two reports, before and after, are compared only on shared `seed`s. The table shows how many pairs got worse (`0->1`), how many got better (`1->0`), and the delta in percentage points. If `z_ref` or the `seed` sets diverge, the comparison says so.
 
-![Сравнение А/Б](docs/screenshot_compare.png)
+![A/B comparison](docs/screenshot_compare.png)
 
-Встроенный парный тест Макнемара и поправка Холма помогают отделить реальные улучшения/ухудшения контроллера от случайного шума.
+The built-in paired McNemar test and Holm correction separate a real controller improvement or regression from chance noise.
 
-## Тестирование
+## Testing
 
 ```bash
 python -m unittest discover tests
 ```
 
-## Troubleshooting (Решение проблем)
+## Troubleshooting
 
-Если вы видите ошибку `Connection error` в браузере, просто закройте вкладку и перезапустите скрипт `python run_dashboard.py`. Игнорируйте текст про `yourscript.py`.
+If the browser shows `Connection error`, close the tab and start the script again with `python run_dashboard.py`. Ignore the text about `yourscript.py`.

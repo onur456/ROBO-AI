@@ -1,4 +1,4 @@
-"""Шаг 4: рекомендации только по Холму, без шаблонов и без «хуже всего: базовый»."""
+"""Step 4: recommendations follow Holm only, with no templates and no "worst of all: baseline"."""
 
 from __future__ import annotations
 
@@ -115,9 +115,9 @@ class Step4DiagnoseTest(unittest.TestCase):
             ]
         )
         text = "\n".join(s4.format_sweep_sections(payload))
-        self.assertIn("значимого вредного эффекта не найдено", text)
-        self.assertNotIn("хуже всего", text.lower())
-        self.assertNotIn("исправлен", text.lower())
+        self.assertIn("no significant harmful effect found", text)
+        self.assertNotIn("worst of all", text.lower())
+        self.assertNotIn("marked as fixed", text.lower())
 
     def test_improving_not_called_fix(self) -> None:
         payload = _payload(
@@ -150,9 +150,9 @@ class Step4DiagnoseTest(unittest.TestCase):
         self.assertEqual(diag["n_significant_harmful"], 0)
         self.assertEqual(diag["n_significant_improving"], 1)
         text = "\n".join(s4.format_recommendation_sections(diag))
-        self.assertIn("улучшающий эффект", text)
-        self.assertNotIn("исправлен", text.lower())
-        self.assertIn("значимого вредного эффекта не найдено", text)
+        self.assertIn("improving effect", text)
+        self.assertNotIn("marked as fixed", text.lower())
+        self.assertIn("no significant harmful effect found", text)
 
     def test_nonsignificant_drop_is_not_improving(self) -> None:
         payload = _payload(
@@ -220,7 +220,7 @@ class Step4DiagnoseTest(unittest.TestCase):
         self.assertEqual(crossings[0]["axis"], "q")
         expected = 0.03 + (0.10 - 0.0) / (0.98 - 0.0) * (0.12 - 0.03)
         self.assertAlmostEqual(crossings[0]["dose"], expected, places=6)
-        self.assertEqual(crossings[0]["note"], "гипотеза")
+        self.assertEqual(crossings[0]["note"], "hypothesis")
 
     def test_top3_unique_params_and_verify_confirmed(self) -> None:
         payload = _payload(
@@ -324,19 +324,19 @@ class Step4DiagnoseTest(unittest.TestCase):
         bias = next(row for row in ver if row["param_id"] == "sensor_bias")
         self.assertEqual(bias["before_id"], "offset")
         self.assertEqual(bias["after_id"], "weak_pos")
-        self.assertEqual(bias["status"], "подтверждено")
+        self.assertEqual(bias["status"], "confirmed")
         noise = next(row for row in ver if row["param_id"] == "sensor_noise")
         self.assertEqual(noise["after_id"], "medium")
-        self.assertEqual(noise["status"], "подтверждено")
+        self.assertEqual(noise["status"], "confirmed")
         floor = next(row for row in ver if row["param_id"] == "floor_contact")
         self.assertEqual(floor["after_id"], "baseline")
-        self.assertEqual(floor["status"], "подтверждено")
+        self.assertEqual(floor["status"], "confirmed")
         text = s4.build_markdown(payload, [], diag)
         self.assertIn("parameter_sweeps_by_scenario.nominal.parameters[floor_contact].levels[soft]", text)
-        self.assertNotIn("железе", text)
+        self.assertNotIn("on the hardware", text)
         self.assertNotIn("go2.xml", text)
-        self.assertNotIn("2 Н·м·с/рад", text)
-        self.assertNotIn("Добавить контур по ориентации", text)
+        self.assertNotIn("2 N*m*s/rad", text)
+        self.assertNotIn("Add an orientation loop", text)
 
     def test_cite_mentions_outcomes_rows(self) -> None:
         level = _level(
@@ -356,7 +356,7 @@ class Step4DiagnoseTest(unittest.TestCase):
             seed=42,
         )
         self.assertIn("parameter_sweeps_by_scenario.nominal.parameters[floor_contact].levels[soft]", cite)
-        self.assertIn("outcomes эпизодов 1–50", cite)
+        self.assertIn("outcomes of episodes 1-50", cite)
         self.assertIn("seed=42", cite)
 
 

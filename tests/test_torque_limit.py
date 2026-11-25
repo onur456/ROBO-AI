@@ -1,4 +1,4 @@
-"""Проверка, что torque_limit=5% реально меняет насыщение и/или исходы."""
+"""Check that torque_limit=5% actually changes saturation and/or outcomes."""
 
 from __future__ import annotations
 
@@ -87,7 +87,7 @@ class TorqueLimitTest(unittest.TestCase):
         self.assertTrue(
             fail_harsh > fail_full or sat_harsh > sat_full + 0.1,
             msg=(
-                f"5% не отличился от 100%: "
+                f"5% did not differ from 100%: "
                 f"fail {fail_full:.2f}->{fail_harsh:.2f}, "
                 f"fall {fall_full:.2f}->{fall_harsh:.2f}, "
                 f"sat {sat_full:.3f}->{sat_harsh:.3f}"

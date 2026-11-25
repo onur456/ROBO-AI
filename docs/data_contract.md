@@ -1,14 +1,14 @@
-# Контракт данных
+# Data contract
 
-Источник: `reports/batch_failures.json` и `reports/outcome_thresholds.json` в том виде, в каком они лежат в репозитории. Поля, которых в файлах нет, сюда не внесены.
+Source: `reports/batch_failures.json` and `reports/outcome_thresholds.json` as they sit in the repository. Fields that are not in those files are not listed here.
 
-Эпизод разобран по записям `outcomes`. У всех 10200 исходов в `parameter_sweeps` и всех 10200 исходов в `parameter_sweeps_by_scenario.moderate` один и тот же набор ключей. Первые два эпизода уровня `com_x` / `zero` сценария `nominal` не содержат сбоя; пример со сбоем взят из `floor_contact` / `soft` того же сценария.
+An episode is read from `outcomes` records. All 10200 outcomes in `parameter_sweeps` and all 10200 outcomes in `parameter_sweeps_by_scenario.moderate` share the same set of keys. The first two episodes of level `com_x` / `zero` in scenario `nominal` have no failure. The failure example comes from `floor_contact` / `soft` in the same scenario.
 
 ## `reports/batch_failures.json`
 
-Корень — объект из 39 полей.
+The root is an object with 39 fields.
 
-| Поле | Тип | Что лежит |
+| Field | Type | What it holds |
 | --- | --- | --- |
 | `n_episodes` | integer | `80` |
 | `n_envs` | integer | `80` |
@@ -17,7 +17,7 @@
 | `failure_rate` | number | `0.0` |
 | `mode` | string | `baseline` |
 | `seed` | integer | `42` |
-| `elapsed_s` | number | секунды прогона |
+| `elapsed_s` | number | run duration in seconds |
 | `n_workers` | integer | `8` |
 | `n_chunks` | integer | `8` |
 | `kp` | number | `40.0` |
@@ -30,11 +30,11 @@
 | `torso_body_id` | integer | `1` |
 | `impulse_start` | integer | `450` |
 | `impulse_end` | integer | `500` |
-| `target_qpos` | array of number | 12 чисел |
-| `failed` | object | сводка по упавшим, см. ниже |
-| `survived` | object | сводка по устоявшим, см. ниже |
-| `failures` | array | пустой массив, элементов нет |
-| `parameter_sweeps` | object | OFAT-сценарий `nominal` |
+| `target_qpos` | array of number | 12 numbers |
+| `failed` | object | summary of failed episodes, see below |
+| `survived` | object | summary of survived episodes, see below |
+| `failures` | array | empty array, no elements |
+| `parameter_sweeps` | object | OFAT scenario `nominal` |
 | `run_mode` | string | `ofat` |
 | `pd` | string | `baseline` |
 | `scenario` | string | `default` |
@@ -43,37 +43,37 @@
 | `lateral_force_range` | array of number | `[-350.0, 350.0]` |
 | `stance_hold` | object | `friction`, `lateral_force`, `n_episodes`, `n_failures`, `failure_rate` |
 | `baseline_grid_path` | string | `reports\baseline_grid.csv` |
-| `baseline_grid` | array of object | 42 строки сетки, не эпизоды OFAT |
+| `baseline_grid` | array of object | 42 grid rows, not OFAT episodes |
 | `created_at` | string | `2026-11-22T18:09:35.278393+00:00` |
-| `config` | object | снимок конфигурации, см. ниже |
+| `config` | object | configuration snapshot, see below |
 | `config_hash` | string | `f920c32514104f9b` |
-| `parameter_sweeps_by_scenario` | object | ключи `nominal` и `moderate` |
-| `parameter_sweeps_moderate` | object | тот же сценарий, что `parameter_sweeps_by_scenario.moderate` |
+| `parameter_sweeps_by_scenario` | object | keys `nominal` and `moderate` |
+| `parameter_sweeps_moderate` | object | the same scenario as `parameter_sweeps_by_scenario.moderate` |
 
-Отдельного массива эпизодов в корне нет. Поэпизодные записи лежат здесь:
+There is no episode array at the root. Per-episode records live here:
 
 `parameter_sweeps.parameters[].levels[].outcomes[]`
 
-Та же форма у `parameter_sweeps_by_scenario.nominal`, `parameter_sweeps_by_scenario.moderate` и `parameter_sweeps_moderate`.
+The same shape is used by `parameter_sweeps_by_scenario.nominal`, `parameter_sweeps_by_scenario.moderate`, and `parameter_sweeps_moderate`.
 
-### Сводки `failed` и `survived`
+### Summaries `failed` and `survived`
 
-У обоих объектов два ключа: `friction` и `lateral_force`. У каждой из этих сводок четыре поля.
+Both objects have two keys: `friction` and `lateral_force`. Each of those summaries has four fields.
 
-| Поле | Тип |
+| Field | Type |
 | --- | --- |
-| `mean` | number или null |
-| `min` | number или null |
-| `max` | number или null |
+| `mean` | number or null |
+| `min` | number or null |
+| `max` | number or null |
 | `count` | integer |
 
-В текущем файле у `failed` все `mean` / `min` / `max` равны null, `count` равен 0. У `survived` числа заполнены, `count` равен 80.
+In the current file, every `mean` / `min` / `max` under `failed` is null and `count` is 0. Under `survived` the numbers are filled in and `count` is 80.
 
 ### `config`
 
-| Поле | Тип | Значение в файле |
+| Field | Type | Value in the file |
 | --- | --- | --- |
-| `model_path` | string | путь к `unitree_go2\scene.xml` |
+| `model_path` | string | path to `unitree_go2\scene.xml` |
 | `seed` | integer | `42` |
 | `kp` | number | `40.0` |
 | `kd` | number | `3.0` |
@@ -100,32 +100,32 @@
 | `failure_criterion` | string | `fall OR stance_loss` |
 | `stance_loss_frac` | number | `0.85` |
 
-### Уровень фактора, внутри которого лежит эпизод
+### Factor level that contains an episode
 
-Путь: `parameter_sweeps.parameters[]` — объект с полями `id`, `name`, `baseline`, `levels`.
+Path: `parameter_sweeps.parameters[]` is an object with fields `id`, `name`, `baseline`, `levels`.
 
-Один элемент `levels[]`:
+One `levels[]` element:
 
-| Поле | Тип | Примечание по файлу |
+| Field | Type | Note from the file |
 | --- | --- | --- |
-| `id` | string | например `zero` |
-| `label` | string | например `базовый 0 м` |
-| `factor` | object | набор ключей зависит от фактора |
+| `id` | string | for example `zero` |
+| `label` | string | for example `базовый 0 м` |
+| `factor` | object | the key set depends on the factor |
 | `n_episodes` | integer | `300` |
 | `n_failures` | integer | |
 | `n_survived` | integer | |
 | `failure_rate` | number | |
-| `failure_rate_ci95` | array of number, длина 2 | |
+| `failure_rate_ci95` | array of number, length 2 | |
 | `n_sag` | integer | |
 | `sag_rate` | number | |
-| `sag_rate_ci95` | array of number, длина 2 | |
-| `fail_reasons` | object | счётчики причин; у нулевого уровня бывает `{}` |
+| `sag_rate_ci95` | array of number, length 2 | |
+| `fail_reasons` | object | reason counts; a zero level can be `{}` |
 | `n_tilt` | integer | |
 | `tilt_rate` | number | |
-| `tilt_rate_ci95` | array of number, длина 2 | |
+| `tilt_rate_ci95` | array of number, length 2 | |
 | `n_stance_loss` | integer | |
 | `stance_loss_rate` | number | |
-| `stance_loss_rate_ci95` | array of number, длина 2 | |
+| `stance_loss_rate_ci95` | array of number, length 2 | |
 | `n_before_impact` | integer | |
 | `n_at_or_after_impact` | integer | |
 | `min_z_mean` | number | |
@@ -133,38 +133,38 @@
 | `elapsed_s` | number | |
 | `n_workers` | integer | |
 | `n_chunks` | integer | |
-| `outcomes` | array of object | эпизоды, см. следующий раздел |
+| `outcomes` | array of object | episodes, see the next section |
 | `delta_vs_baseline` | number | |
-| `mcnemar` | object или null | у базового уровня `com_x` / `zero` стоит null |
-| `p_mcnemar` | number или null | |
-| `p_holm` | number или null | |
+| `mcnemar` | object or null | null on the baseline level `com_x` / `zero` |
+| `p_mcnemar` | number or null | |
+| `p_holm` | number or null | |
 | `significant` | boolean | |
-| `effect_label` | string | в файле встречаются `норма`, `в пределах шума`, `значимо` |
+| `effect_label` | string | the file contains `норма`, `в пределах шума`, `значимо` |
 
-`fail_reasons` — не поле эпизода. Это объект уровня. В файле встречаются пустой объект, `{"stance_loss": 300}` и `{"fall": 72, "stance_loss": 61}`.
+`fail_reasons` is not an episode field. It is a level object. The file contains an empty object, `{"stance_loss": 300}`, and `{"fall": 72, "stance_loss": 61}`.
 
-Если `mcnemar` — объект, у него такие ключи: `test` (string, значение `mcnemar_exact`), `n_paired`, `n00`, `n01`, `n10`, `n11`, `n_discordant` (integer), `pvalue` (number).
+When `mcnemar` is an object, its keys are: `test` (string, value `mcnemar_exact`), `n_paired`, `n00`, `n01`, `n10`, `n11`, `n_discordant` (integer), `pvalue` (number).
 
-### Один эпизод (`outcomes[]`)
+### One episode (`outcomes[]`)
 
-| Поле | Тип | Пример без сбоя (`nominal`, `com_x` / `zero`, эпизоды 1 и 2) | Пример со сбоем (`nominal`, `floor_contact` / `soft`, эпизод 1) |
+| Field | Type | Example without a failure (`nominal`, `com_x` / `zero`, episodes 1 and 2) | Example with a failure (`nominal`, `floor_contact` / `soft`, episode 1) |
 | --- | --- | --- | --- |
-| `episode` | integer | `1`, затем `2` | `1` |
-| `seed` | integer | `42000127`, затем `42000128` | `42000127` |
+| `episode` | integer | `1`, then `2` | `1` |
+| `seed` | integer | `42000127`, then `42000128` | `42000127` |
 | `failed` | boolean | `false` | `true` |
 | `fail_fall` | boolean | `false` | `false` |
 | `fail_stance_loss` | boolean | `false` | `true` |
-| `fail_reason` | null или string | `null` | `stance_loss` |
+| `fail_reason` | null or string | `null` | `stance_loss` |
 
-Других ключей у эпизода в этом файле нет. Поля `scenario` на эпизоде нет: сценарий записан выше, на объекте свипа (`scenario`: `nominal` или `moderate`).
+An episode in this file has no other keys. There is no `scenario` field on the episode: the scenario is stored above, on the sweep object (`scenario`: `nominal` or `moderate`).
 
-По всем эпизодам обоих сценариев `fail_reason` принимает только три значения: `null`, `stance_loss`, `fall`.
+Across every episode of both scenarios, `fail_reason` takes only three values: `null`, `stance_loss`, `fall`.
 
 ## `reports/outcome_thresholds.json`
 
-Корень — объект. Вложенный объект один: `failure_criterion`.
+The root is an object. The only nested object is `failure_criterion`.
 
-| Поле | Тип | Значение |
+| Field | Type | Value |
 | --- | --- | --- |
 | `n_nominal` | integer | `200` |
 | `n_standing` | integer | `200` |
@@ -181,14 +181,14 @@
 | `slip_std` | number | `0.0045421121268086765` |
 | `slip_threshold_rule` | string | `max(nominal) + 3σ` |
 | `slip_threshold` | number | `0.06211325560010261` |
-| `failure_criterion` | object | см. таблицу ниже |
+| `failure_criterion` | object | see the table below |
 | `post_impact_measure_s` | number | `0.4` |
 | `seed` | integer | `42` |
 | `created_at` | string | `2026-11-22T18:37:00.604341+00:00` |
 
 ### `failure_criterion`
 
-| Поле | Тип | Значение |
+| Field | Type | Value |
 | --- | --- | --- |
 | `fail` | string | `fall OR stance_loss` |
 | `fall` | string | `abs(roll)>45° or abs(pitch)>45° or body z<0.12 m` |

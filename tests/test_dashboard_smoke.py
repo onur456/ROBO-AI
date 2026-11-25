@@ -1,4 +1,4 @@
-"""Дымовой тест загрузки эпизодов дашборда без запуска Streamlit."""
+"""Smoke test: load dashboard episodes without starting Streamlit."""
 
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ def _mini_batch() -> dict:
                     "levels": [
                         {
                             "id": "zero",
-                            "label": "базовый 0 м",
+                            "label": "baseline 0 m",
                             "outcomes": [
                                 {
                                     "episode": 1,
@@ -62,7 +62,7 @@ class DashboardSmokeTest(unittest.TestCase):
             self.assertIn(column, frame.columns)
         self.assertEqual(len(frame), 2)
         self.assertEqual(list(frame["param_id"]), ["com_x", "com_x"])
-        self.assertEqual(list(frame["level_label"]), ["базовый 0 м", "базовый 0 м"])
+        self.assertEqual(list(frame["level_label"]), ["baseline 0 m", "baseline 0 m"])
         self.assertEqual(list(frame["failed"]), [False, True])
 
 

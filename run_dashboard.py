@@ -10,17 +10,17 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 APP = ROOT / "dashboard" / "app.py"
 MISSING_STREAMLIT = (
-    "Ошибка: Streamlit не установлен. "
-    "Пожалуйста, выполните: pip install streamlit pandas plotly"
+    "Error: Streamlit is not installed. "
+    "Please run: pip install streamlit pandas plotly"
 )
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Запуск Robo AI Stress Test Dashboard")
+    parser = argparse.ArgumentParser(description="Launch the Robo AI Stress Test Dashboard")
     parser.add_argument(
         "--report",
         default="reports/batch_failures.json",
-        help="JSON батча. Подставляется в сайдбар дашборда",
+        help="Batch JSON. Prefills the dashboard sidebar",
     )
     return parser.parse_args()
 
@@ -50,8 +50,8 @@ def main() -> None:
     report_path = resolve_report(args.report)
     if not report_path.is_file():
         print(
-            f"Предупреждение: файл не найден: {report_path}. "
-            "Дашборд всё равно запускается, путь можно ввести в сайдбаре.",
+            f"Warning: file not found: {report_path}. "
+            "The dashboard still starts; the path can be entered in the sidebar.",
             flush=True,
         )
     try:
