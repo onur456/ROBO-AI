@@ -4914,7 +4914,20 @@ def main() -> None:
     ACTIVE_CONTROLLER, _import_root = prepare_controller_spec(str(args.controller))
     make_controller(ACTIVE_CONTROLLER, main_kp, main_kd)
 
-    model = mujoco.MjModel.from_xml_path(MODEL_PATH)
+    try:
+        model = mujoco.MjModel.from_xml_path(MODEL_PATH)
+        motor_ids = profile_motor_ids(model)
+        if len(motor_ids) != model.nu:
+            raise RuntimeError(
+                f"profile num_motors={PROFILE.num_motors} does not match "
+                f"actuator count ({model.nu})"
+            )
+    except Exception:
+        print(
+            f"Error: Could not load robot model from {args.config}. "
+            "Please check your model_path and joint names"
+        )
+        raise SystemExit(1)
     data = mujoco.MjData(model)
     floor_id = find_floor_geom_id(model)
     foot_ids = find_foot_geom_ids(model)
@@ -4942,11 +4955,6 @@ def main() -> None:
 
     reset_to_stance(model, data)
     target_qpos = np.array(data.qpos[7:], copy=True)
-    if len(profile_motor_ids(model)) != model.nu:
-        raise RuntimeError(
-            f"profile num_motors={PROFILE.num_motors} does not match "
-            f"actuator count ({model.nu})"
-        )
     if model.nu != len(target_qpos):
         raise RuntimeError(
             f"actuator count ({model.nu}) does not match joint count ({len(target_qpos)})"
