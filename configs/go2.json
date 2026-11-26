@@ -1,0 +1,47 @@
+{
+  "model_path": "C:\\Users\\HP\\Desktop\\mujoco_menagerie-main\\mujoco_menagerie-main\\unitree_go2\\scene.xml",
+  "joint_names": [
+    "FL_hip",
+    "FL_thigh",
+    "FL_calf",
+    "FR_hip",
+    "FR_thigh",
+    "FR_calf",
+    "RL_hip",
+    "RL_thigh",
+    "RL_calf",
+    "RR_hip",
+    "RR_thigh",
+    "RR_calf"
+  ],
+  "num_motors": 12,
+  "hip_actuator": "FL_hip",
+  "calf_actuator": "FL_calf",
+  "target_height": 0.2440828391927459,
+  "fall_height": 0.2,
+  "contact_z": 0.12,
+  "tilt_fail_deg": 45,
+  "outcome_thresholds": {
+    "z_ref": 0.2440828391927459,
+    "z_settle_mean": 0.24363440479537132,
+    "z_settle_min": 0.24132307227128694,
+    "z_settle_max": 0.24630712325938614,
+    "z_settle_std": 0.0009723104052120386,
+    "z_threshold_rule": "min(nominal) - 3σ",
+    "z_threshold": 0.23840614105565083,
+    "slip_mean": 0.0372862175631595,
+    "slip_min": 0.026096063048556432,
+    "slip_max": 0.048486919219676586,
+    "slip_std": 0.0045421121268086765,
+    "slip_threshold_rule": "max(nominal) + 3σ",
+    "slip_threshold": 0.06211325560010261,
+    "failure_criterion": {
+      "fail": "fall OR stance_loss",
+      "fall": "abs(roll)>45° or abs(pitch)>45° or body z<0.12 m",
+      "stance_loss": "z_settle < z_threshold OR slip > slip_threshold",
+      "slip": "max foot xy displacement relative to body",
+      "measure": "0.40s after impulse_end"
+    },
+    "post_impact_measure_s": 0.4
+  }
+}

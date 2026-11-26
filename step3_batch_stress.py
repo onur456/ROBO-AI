@@ -15,17 +15,20 @@ import mujoco
 
 import controllers
 from controllers import JointPDController, make_controller, prepare_controller_spec
+from robot_profile import RobotProfile
 
-MODEL_PATH = r"C:\Users\HP\Desktop\mujoco_menagerie-main\mujoco_menagerie-main\unitree_go2\scene.xml"
+DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "go2.json"
+PROFILE = RobotProfile(DEFAULT_CONFIG)
+MODEL_PATH = PROFILE.model_path
 N_ENVS = 80
 N_EPISODES = N_ENVS
 N_SWEEP_EPISODES = 50
 CHUNK_SIZE = 10
 MAX_STEPS = 1500
 WINDOW_SIZE = 200
-SAG_Z = 0.20
-CONTACT_Z = 0.12
-TILT_FAIL_RAD = math.radians(45.0)
+SAG_Z = float(PROFILE.fall_height)
+CONTACT_Z = float(PROFILE.contact_z)
+TILT_FAIL_RAD = math.radians(float(PROFILE.tilt_fail_deg))
 STANCE_LOSS_FRAC = 0.85
 DEGRADATION_FRAC = 0.03
 POST_IMPACT_MEASURE_S = 0.40
@@ -450,6 +453,11 @@ GEOM_TYPE_NAMES = {
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch stress for Go2 PD stance")
+    parser.add_argument(
+        "--config",
+        default="configs/go2.json",
+        help="Robot profile JSON. Default: configs/go2.json",
+    )
     parser.add_argument(
         "--mode",
         choices=("full", "quick", "ofat", "grid", "sag", "ff", "criteria", "fycrit", "pd_ff", "torque"),
@@ -970,19 +978,55 @@ def apply_torque_limit(model: mujoco.MjModel, scale: float) -> np.ndarray:
     return written
 
 
+def apply_robot_profile(profile: RobotProfile) -> None:
+    """Point the module constants at one robot profile."""
+    global PROFILE, MODEL_PATH, SAG_Z, CONTACT_Z, TILT_FAIL_RAD, FALL_HEIGHT
+    PROFILE = profile
+    MODEL_PATH = profile.model_path
+    SAG_Z = float(profile.fall_height)
+    FALL_HEIGHT = float(profile.fall_height)
+    CONTACT_Z = float(profile.contact_z)
+    TILT_FAIL_RAD = math.radians(float(profile.tilt_fail_deg))
+
+
+def profile_motor_ids(model: mujoco.MjModel) -> list[int]:
+    """Actuator indices in the profile joint order."""
+    ids: list[int] = []
+    for name in PROFILE.joint_names:
+        act_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+        if act_id < 0:
+            raise RuntimeError(
+                f"actuator {name!r} from {PROFILE.config_path} was not found"
+            )
+        ids.append(int(act_id))
+    if len(ids) != int(PROFILE.num_motors):
+        raise RuntimeError(
+            f"profile lists {len(ids)} joints, num_motors is {PROFILE.num_motors}"
+        )
+    return ids
+
+
+def actuator_index(model: mujoco.MjModel, name: str) -> int:
+    act_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+    if act_id < 0:
+        raise RuntimeError(f"actuator {name!r} was not found")
+    return int(act_id)
+
+
 def actuator_dof_gears(model: mujoco.MjModel) -> tuple[np.ndarray, np.ndarray]:
-    dofs = np.empty(model.nu, dtype=int)
-    gears = np.empty(model.nu, dtype=float)
-    for i in range(model.nu):
+    motor_ids = profile_motor_ids(model)
+    dofs = np.empty(len(motor_ids), dtype=int)
+    gears = np.empty(len(motor_ids), dtype=float)
+    for slot, i in enumerate(motor_ids):
         jid = int(model.actuator_trnid[i, 0])
-        dofs[i] = int(model.jnt_dofadr[jid])
-        gears[i] = float(model.actuator_gear[i, 0])
+        dofs[slot] = int(model.jnt_dofadr[jid])
+        gears[slot] = float(model.actuator_gear[i, 0])
     return dofs, gears
 
 
 def actuator_joint_rows(model: mujoco.MjModel) -> list[dict]:
     rows: list[dict] = []
-    for i in range(model.nu):
+    for i in profile_motor_ids(model):
         jid = int(model.actuator_trnid[i, 0])
         dof = int(model.jnt_dofadr[jid])
         gear = float(model.actuator_gear[i, 0])
@@ -1004,7 +1048,7 @@ def actuator_joint_rows(model: mujoco.MjModel) -> list[dict]:
 
 
 def add_mapped_gravity_ff(model: mujoco.MjModel, data: mujoco.MjData) -> None:
-    for i in range(model.nu):
+    for i in profile_motor_ids(model):
         jid = int(model.actuator_trnid[i, 0])
         dof = int(model.jnt_dofadr[jid])
         gear = float(model.actuator_gear[i, 0])
@@ -1488,7 +1532,11 @@ def simulate_episode(
         applied_ff = np.array(key_ctrl, copy=True) if keyframe_ff else ff_ctrl
         foot_slip_max = 0.0
         foot_slip_world_max = 0.0
-        z_ref = STANCE_THRESH.get("z_ref") or STANCE_REF["z"] if stance_ref_z is None else stance_ref_z
+        z_ref = (
+            STANCE_THRESH.get("z_ref") or STANCE_REF["z"] or PROFILE.target_height
+            if stance_ref_z is None
+            else stance_ref_z
+        )
         if stance_ref_z is not None:
             z_ref = stance_ref_z
         loss_frac = STANCE_LOSS_FRAC if stance_loss_frac is None else float(stance_loss_frac)
@@ -1929,11 +1977,13 @@ def probe_torque_limit(
     lateral_force: float = COM_PROBE_FORCE,
 ) -> list[dict]:
     origin = stock_ctrlrange(model)
+    hip_i = actuator_index(model, PROFILE.hip_actuator)
+    calf_i = actuator_index(model, PROFILE.calf_actuator)
     print(
         f"\ntorque-limit probe: mu={COM_PROBE_FRICTION:g} "
         f"Fy={lateral_force:.1f} N on steps {IMPULSE_START}..{IMPULSE_END}  "
-        f"ctrlrange0 hip=[{origin[0, 0]:.2f}, {origin[0, 1]:.2f}]  "
-        f"ctrllimited={bool(model.actuator_ctrllimited[0])}"
+        f"ctrlrange0 hip=[{origin[hip_i, 0]:.2f}, {origin[hip_i, 1]:.2f}]  "
+        f"ctrllimited={bool(model.actuator_ctrllimited[hip_i])}"
     )
     results: list[dict] = []
     try:
@@ -1955,13 +2005,13 @@ def probe_torque_limit(
             result["label"] = label
             result["scale"] = scale
             results.append(result)
-            hip_limit = float(np.min(np.abs(written[0])))
-            calf_limit = float(np.min(np.abs(written[2])))
+            hip_limit = float(np.min(np.abs(written[hip_i])))
+            calf_limit = float(np.min(np.abs(written[calf_i])))
             hit = "yes" if result["hit_limit"] else "no"
             sat = float(result["saturation_frac"])
             print(
-                f"  {label} ctrlrange: hip=[{written[0, 0]:.2f}, {written[0, 1]:.2f}] "
-                f"calf=[{written[2, 0]:.2f}, {written[2, 1]:.2f}]  "
+                f"  {label} ctrlrange: hip=[{written[hip_i, 0]:.2f}, {written[hip_i, 1]:.2f}] "
+                f"calf=[{written[calf_i, 0]:.2f}, {written[calf_i, 1]:.2f}]  "
                 f"{episode_status(result)}, z_end={result['z_end']:.4f}, "
                 f"z_min={result['min_z']:.4f}  "
                 f"max|ctrl|_raw={result['max_abs_ctrl_raw']:.3f}  "
@@ -1974,7 +2024,7 @@ def probe_torque_limit(
         if float(np.max(np.abs(restored - origin))) > 1e-12:
             raise RuntimeError("failed to restore actuator_ctrlrange")
         print(
-            f"  ctrlrange restored: hip=[{restored[0, 0]:.2f}, {restored[0, 1]:.2f}]"
+            f"  ctrlrange restored: hip=[{restored[hip_i, 0]:.2f}, {restored[hip_i, 1]:.2f}]"
         )
 
     reduced_hit = [r for r in results if r["scale"] < 1.0 - 1e-12]
@@ -2538,6 +2588,8 @@ def split_chunks(
 
 def _run_chunk(payload: dict) -> dict:
     controllers.apply_import_root(payload.get("controller_import_root"))
+    if payload.get("config_path"):
+        apply_robot_profile(RobotProfile(payload["config_path"]))
     model = mujoco.MjModel.from_xml_path(MODEL_PATH)
     data = mujoco.MjData(model)
     floor_id = find_floor_geom_id(model)
@@ -2625,6 +2677,7 @@ def run_stress_batch_parallel(
             "impulse_cfg": dict(IMPULSE_CFG),
             "controller": controller_spec,
             "controller_import_root": import_root,
+            "config_path": str(PROFILE.config_path),
         }
         for chunk in chunks
     ]
@@ -4647,10 +4700,16 @@ def run_pd_ff_variant(
 
 
 def load_outcome_thresholds() -> dict | None:
-    if not THRESHOLDS_PATH.exists():
+    if THRESHOLDS_PATH.exists():
+        derivation = json.loads(THRESHOLDS_PATH.read_text(encoding="utf-8"))
+        source = str(THRESHOLDS_PATH)
+    elif PROFILE.outcome_thresholds:
+        derivation = dict(PROFILE.outcome_thresholds)
+        derivation.setdefault("z_ref", PROFILE.target_height)
+        source = str(PROFILE.config_path)
+    else:
         print(f"missing {THRESHOLDS_PATH}, stance_loss has no 3-sigma calibration")
         return None
-    derivation = json.loads(THRESHOLDS_PATH.read_text(encoding="utf-8"))
     STANCE_THRESH.update(
         {
             "z_threshold": derivation["z_threshold"],
@@ -4662,7 +4721,7 @@ def load_outcome_thresholds() -> dict | None:
     )
     STANCE_REF["z"] = float(derivation["z_ref"])
     print(
-        f"stance_loss thresholds from {THRESHOLDS_PATH}: "
+        f"stance_loss thresholds from {source}: "
         f"z<{derivation['z_threshold']:.4f} m  slip>{derivation['slip_threshold']:.4f} m"
     )
     return derivation
@@ -4750,10 +4809,12 @@ def run_torque_limit_test(
     kd: float,
 ) -> dict:
     stock = stock_ctrlrange(model)
+    hip_i = actuator_index(model, PROFILE.hip_actuator)
+    calf_i = actuator_index(model, PROFILE.calf_actuator)
     print("\ntorque_limit check: clip ctrl to actuator_ctrlrange, ctrllimited=1")
     print(
-        f"  stock ctrlrange hip=[{stock[0, 0]:.2f},{stock[0, 1]:.2f}] "
-        f"calf=[{stock[2, 0]:.2f},{stock[2, 1]:.2f}]  "
+        f"  stock ctrlrange hip=[{stock[hip_i, 0]:.2f},{stock[hip_i, 1]:.2f}] "
+        f"calf=[{stock[calf_i, 0]:.2f},{stock[calf_i, 1]:.2f}]  "
         f"ctrllimited={bool(np.all(model.actuator_ctrllimited))}"
     )
     derivation = load_outcome_thresholds()
@@ -4784,16 +4845,16 @@ def run_torque_limit_test(
         row = {
             "scale": scale,
             "label": f"{scale * 100:.0f}%",
-            "ctrlrange_hip": [float(written[0, 0]), float(written[0, 1])],
-            "ctrlrange_calf": [float(written[2, 0]), float(written[2, 1])],
+            "ctrlrange_hip": [float(written[hip_i, 0]), float(written[hip_i, 1])],
+            "ctrlrange_calf": [float(written[calf_i, 0]), float(written[calf_i, 1])],
             **stats,
         }
         levels.append(row)
         tau = row["max_tau_over_limit_mean"]
         sat = row["saturation_frac_mean"]
         print(
-            f"  {row['label']:>4}  hip_lim={abs(written[0, 0]):.2f} N*m  "
-            f"calf_lim={abs(written[2, 0]):.2f} N*m  "
+            f"  {row['label']:>4}  hip_lim={abs(written[hip_i, 0]):.2f} N*m  "
+            f"calf_lim={abs(written[calf_i, 0]):.2f} N*m  "
             f"max|tau|/limit={0.0 if tau is None else tau:.3f}  "
             f"sat={format_sat_pct(sat)} ({row['limit_note']})  "
             f"fail={row['n_fail']}/{row['n']}={row['fail_rate']*100:.1f}%  "
@@ -4820,8 +4881,8 @@ def run_torque_limit_test(
         "n_episodes": N_TORQUE_EPISODES,
         "scenario": "nominal",
         "failure_criterion": "fall OR stance_loss",
-        "stock_ctrlrange_hip": [float(stock[0, 0]), float(stock[0, 1])],
-        "stock_ctrlrange_calf": [float(stock[2, 0]), float(stock[2, 1])],
+        "stock_ctrlrange_hip": [float(stock[hip_i, 0]), float(stock[hip_i, 1])],
+        "stock_ctrlrange_calf": [float(stock[calf_i, 0]), float(stock[calf_i, 1])],
         "ctrllimited": True,
         "thresholds": derivation,
         "probe": probe_rows,
@@ -4836,6 +4897,7 @@ def run_torque_limit_test(
 def main() -> None:
     global ACTIVE_CONTROLLER, REPORT_PATH
     args = parse_args()
+    apply_robot_profile(RobotProfile(args.config))
     if args.report:
         REPORT_PATH = Path(args.report)
     if args.compare:
@@ -4880,6 +4942,11 @@ def main() -> None:
 
     reset_to_stance(model, data)
     target_qpos = np.array(data.qpos[7:], copy=True)
+    if len(profile_motor_ids(model)) != model.nu:
+        raise RuntimeError(
+            f"profile num_motors={PROFILE.num_motors} does not match "
+            f"actuator count ({model.nu})"
+        )
     if model.nu != len(target_qpos):
         raise RuntimeError(
             f"actuator count ({model.nu}) does not match joint count ({len(target_qpos)})"
