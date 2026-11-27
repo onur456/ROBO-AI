@@ -238,6 +238,63 @@ class DashboardSmokeTest(unittest.TestCase):
         payload = json.loads(report.read_text(encoding="utf-8"))
         self.assertEqual(len(payload["episodes"]), 1)
 
+    def test_uploaded_profile_records_robot_type(self) -> None:
+        from dashboard.workspace import write_uploaded_profile
+
+        with tempfile.TemporaryDirectory() as folder:
+            urdf_profile = Path(folder) / "urdf.json"
+            write_uploaded_profile(ROOT / "models" / "simple_arm.urdf", urdf_profile)
+            urdf_raw = json.loads(urdf_profile.read_text(encoding="utf-8"))
+            self.assertEqual(urdf_raw["robot_type"], "manipulator")
+
+            fixed = Path(folder) / "fixed.xml"
+            fixed.write_text(
+                """
+                <mujoco>
+                  <worldbody>
+                    <body name="link0">
+                      <joint name="hinge" type="hinge"/>
+                      <geom size="0.1"/>
+                    </body>
+                  </worldbody>
+                  <actuator>
+                    <motor name="m1" joint="hinge"/>
+                  </actuator>
+                </mujoco>
+                """,
+                encoding="utf-8",
+            )
+            fixed_profile = Path(folder) / "fixed.json"
+            write_uploaded_profile(fixed, fixed_profile)
+            fixed_raw = json.loads(fixed_profile.read_text(encoding="utf-8"))
+            self.assertEqual(fixed_raw["robot_type"], "manipulator")
+
+            floating = Path(folder) / "float.xml"
+            floating.write_text(
+                """
+                <mujoco>
+                  <worldbody>
+                    <body name="base">
+                      <freejoint/>
+                      <geom size="0.1"/>
+                      <body name="leg">
+                        <joint name="hinge" type="hinge"/>
+                        <geom size="0.05"/>
+                      </body>
+                    </body>
+                  </worldbody>
+                  <actuator>
+                    <motor name="m1" joint="hinge"/>
+                  </actuator>
+                </mujoco>
+                """,
+                encoding="utf-8",
+            )
+            float_profile = Path(folder) / "float.json"
+            write_uploaded_profile(floating, float_profile)
+            float_raw = json.loads(float_profile.read_text(encoding="utf-8"))
+            self.assertEqual(float_raw["robot_type"], "legged")
+
     def test_bad_model_is_reported_before_the_batch(self) -> None:
         from dashboard.workspace import write_uploaded_profile
 

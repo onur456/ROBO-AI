@@ -889,11 +889,23 @@ def find_foot_geom_ids(model: mujoco.MjModel) -> list[int]:
             ids.append(int(geom_id))
     if ids:
         return ids
+    # A fixed arm has no feet. Priority>0 geoms are not a substitute.
+    if getattr(PROFILE, "robot_type", "legged") == "manipulator":
+        return []
     return [
         geom_id
         for geom_id in range(model.ngeom)
         if int(model.geom_priority[geom_id]) > 0
     ]
+
+
+def end_effector_body_id(model: mujoco.MjModel) -> int:
+    """Hand or the last body. Used for manipulator tracking, not for Go2."""
+    for name in ("hand", "ee", "gripper", "end_effector"):
+        body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name)
+        if body_id >= 0:
+            return int(body_id)
+    return int(model.nbody - 1)
 
 
 def set_sliding_friction(model: mujoco.MjModel, geom_ids: list[int], friction: float) -> None:
@@ -1715,6 +1727,24 @@ def simulate_episode(
             force_x = 0.0
             force_y = float(lateral_force)
         height_offset = float(pert.get("impulse_height") or 0.0)
+        impulse_mode = str(getattr(PROFILE, "impulse_mode", "base"))
+        impulse_body_id = int(torso_body_id)
+        applied_force_y = float(force_y)
+        applied_force_x = float(force_x)
+        if impulse_mode == "none":
+            applied_force_y = 0.0
+            applied_force_x = 0.0
+        elif impulse_mode == "ee":
+            impulse_body_id = end_effector_body_id(model)
+            scale = float(getattr(PROFILE, "impulse_force_scale", 1.0))
+            applied_force_y *= scale
+            applied_force_x *= scale
+        ee_body_id = None
+        ee_origin = None
+        ee_tracking_error = 0.0
+        if getattr(PROFILE, "robot_type", "legged") == "manipulator":
+            ee_body_id = end_effector_body_id(model)
+            ee_origin = np.array(data.xpos[ee_body_id], dtype=float)
         policy = (
             controller
             if controller is not None
@@ -1754,14 +1784,16 @@ def simulate_episode(
                 sat_steps += 1
                 hit_limit = True
             max_abs_ctrl = max(max_abs_ctrl, float(np.max(np.abs(data.ctrl))))
+            if impulse_body_id != int(torso_body_id):
+                data.xfrc_applied[torso_body_id] = 0.0
             apply_torso_impulse(
                 data,
-                torso_body_id,
+                impulse_body_id,
                 step,
-                force_y,
+                applied_force_y,
                 impulse_start=impulse_start,
                 impulse_end=impulse_end,
-                force_x=force_x,
+                force_x=applied_force_x,
                 height_offset=height_offset,
             )
             mujoco.mj_step(model, data)
@@ -1776,6 +1808,11 @@ def simulate_episode(
             max_abs_pitch = max(max_abs_pitch, abs(pitch))
             max_tilt = max(max_tilt, tilt)
             max_body_speed = max(max_body_speed, speed)
+            if ee_origin is not None and ee_body_id is not None:
+                ee_tracking_error = max(
+                    ee_tracking_error,
+                    float(np.linalg.norm(np.array(data.xpos[ee_body_id], dtype=float) - ee_origin)),
+                )
             body_xy = body_planar_xy(model, data)
             slip_now = 0.0
             rels = []
@@ -1855,26 +1892,33 @@ def simulate_episode(
     if fall:
         fail_reason = "fall"
     tilt_fail = fall
-    stance_loss = False
-    degradation = False
     z_thr = STANCE_THRESH.get("z_threshold")
     slip_thr = STANCE_THRESH.get("slip_threshold")
     z_ref_use = z_ref if z_ref is not None else STANCE_THRESH.get("z_ref")
-    if not fall:
-        z_bad = z_thr is not None and z_after_settle < float(z_thr)
-        slip_bad = slip_thr is not None and foot_slip_at_measure > float(slip_thr)
-        if z_bad or slip_bad:
-            stance_loss = True
-            fail_reason = "stance_loss"
-            fail_step = int(measure_step)
-        elif (
-            z_ref_use is not None
-            and float(z_ref_use) > 1e-9
-            and z_after_settle < (1.0 - DEGRADATION_FRAC) * float(z_ref_use)
-        ):
-            degradation = True
-            fail_reason = None
-    failed = fall or stance_loss
+    robot_type = str(getattr(PROFILE, "robot_type", "legged"))
+    sat_frac = (sat_steps / len(zs)) if zs else 0.0
+    outcome = classify_episode_outcome(
+        fall=fall,
+        z_after_settle=z_after_settle,
+        foot_slip=float(foot_slip_at_measure),
+        n_feet=len(feet),
+        z_thr=z_thr,
+        slip_thr=slip_thr,
+        z_ref_use=z_ref_use,
+        robot_type=robot_type,
+        ee_tracking_error=ee_tracking_error if robot_type == "manipulator" else None,
+        ee_limit=getattr(PROFILE, "ee_tracking_limit_m", None),
+        saturation_frac=sat_frac,
+        saturation_frac_limit=getattr(PROFILE, "saturation_frac_limit", None),
+        max_tau_over_limit=float(max_tau_over_limit),
+        tau_over_limit_limit=getattr(PROFILE, "tau_over_limit_limit", None),
+    )
+    stance_loss = bool(outcome["stance_loss"])
+    degradation = bool(outcome["degradation"])
+    fail_reason = outcome["fail_reason"]
+    failed = bool(outcome["failed"])
+    if fail_reason in ("stance_loss", "ee_tracking_error", "torque_saturation"):
+        fail_step = int(measure_step)
     metrics = {
         "episode": int(episode),
         "seed": int(pert["seed"]),
@@ -1919,6 +1963,13 @@ def simulate_episode(
         "z_end": float(zs[-1]) if zs else float(z_start),
         "n_steps": len(zs),
     }
+    if robot_type == "manipulator":
+        metrics["ee_tracking_error"] = float(ee_tracking_error)
+        metrics["torque_saturation"] = bool(outcome["torque_fail"])
+        metrics["fail_ee_tracking"] = bool(outcome["ee_fail"])
+        metrics["fail_torque_saturation"] = bool(outcome["torque_fail"])
+        metrics["impulse_mode"] = impulse_mode
+        metrics["applied_lateral_force"] = float(applied_force_y)
     result = {
         **metrics,
         "kp": float(kp),
@@ -3265,9 +3316,15 @@ def measure_stance_reference(
         f"  z_start={result['z_start']:.4f} z_end={result['z_end']:.4f} "
         f"z_ref={z_ref:.4f} m"
     )
-    if announce_frac_rule:
+    if announce_frac_rule and getattr(PROFILE, "robot_type", "legged") != "manipulator":
         print(
             f"  stance_loss if z_after_settle < {frac:.2f}x{z_ref:.4f} = {z_lim:.4f} m"
+        )
+    elif getattr(PROFILE, "robot_type", "legged") == "manipulator":
+        print(
+            "  manipulator fail: "
+            f"ee_tracking_error > {float(PROFILE.ee_tracking_limit_m):.4f} m "
+            f"or saturation_frac > {float(PROFILE.saturation_frac_limit):.2f}"
         )
     return z_ref
 
@@ -3882,9 +3939,19 @@ def print_main_batch_summary(
         z_thr = stance.get("z_threshold")
         slip = stance.get("slip_threshold")
         z_txt = f"{float(z_ref):.4f} m" if z_ref is not None else "n/a"
-        thr_txt = f"z<{float(z_thr):.4f} m" if z_thr is not None else "z n/a"
-        slip_txt = f"slip>{float(slip):.4f} m" if slip is not None else "slip n/a"
-        print(f"reference z_ref={z_txt}  stance_loss threshold: {thr_txt}  {slip_txt}")
+        if getattr(PROFILE, "robot_type", "legged") == "manipulator":
+            ee_lim = getattr(PROFILE, "ee_tracking_limit_m", None)
+            sat_lim = getattr(PROFILE, "saturation_frac_limit", None)
+            ee_txt = "n/a" if ee_lim is None else f"{float(ee_lim):.4f} m"
+            sat_txt = "n/a" if sat_lim is None else f"{float(sat_lim):.2f}"
+            print(
+                f"reference z_ref={z_txt}  "
+                f"ee_tracking_error>{ee_txt}  saturation_frac>{sat_txt}"
+            )
+        else:
+            thr_txt = f"z<{float(z_thr):.4f} m" if z_thr is not None else "z n/a"
+            slip_txt = f"slip>{float(slip):.4f} m" if slip is not None else "slip n/a"
+            print(f"reference z_ref={z_txt}  stance_loss threshold: {thr_txt}  {slip_txt}")
     print(f"episodes: {batch['n_episodes']}  seed={SEED}")
     print(
         f"parallel: {batch['n_workers']} workers, "
@@ -4857,32 +4924,149 @@ def run_pd_ff_variant(
     return payload
 
 
-def load_outcome_thresholds() -> dict | None:
-    if THRESHOLDS_PATH.exists():
+def resolve_outcome_thresholds(profile: RobotProfile | None = None) -> tuple[dict | None, str]:
+    """Go2 keeps reports/outcome_thresholds.json. Other robots use their own profile."""
+    profile = PROFILE if profile is None else profile
+    use_file = bool(getattr(profile, "use_global_outcome_thresholds", False))
+    if use_file and THRESHOLDS_PATH.exists():
         derivation = json.loads(THRESHOLDS_PATH.read_text(encoding="utf-8"))
-        source = str(THRESHOLDS_PATH)
-    elif PROFILE.outcome_thresholds:
-        derivation = dict(PROFILE.outcome_thresholds)
-        derivation.setdefault("z_ref", PROFILE.target_height)
-        source = str(PROFILE.config_path)
-    else:
+        return derivation, str(THRESHOLDS_PATH)
+    if profile.outcome_thresholds:
+        derivation = dict(profile.outcome_thresholds)
+        z_ref = float(derivation.get("z_ref") or profile.target_height)
+        derivation["z_ref"] = z_ref
+        if derivation.get("z_threshold") is None:
+            derivation["z_threshold"] = 0.85 * z_ref
+            derivation["z_threshold_rule"] = "0.85 * z_ref"
+        return derivation, str(profile.config_path)
+    z_ref = float(profile.target_height)
+    derivation = {
+        "z_ref": z_ref,
+        "z_threshold": 0.85 * z_ref,
+        "z_threshold_rule": "0.85 * z_ref",
+        "slip_threshold": None,
+        "slip_threshold_rule": "no separate slip calibration; height uses 0.85 * z_ref",
+    }
+    return derivation, f"{profile.config_path} (0.85 * z_ref)"
+
+
+def load_outcome_thresholds() -> dict | None:
+    derivation, source = resolve_outcome_thresholds(PROFILE)
+    if not derivation:
         print(f"missing {THRESHOLDS_PATH}, stance_loss has no 3-sigma calibration")
         return None
+    z_thr = derivation.get("z_threshold")
+    slip_thr = derivation.get("slip_threshold")
+    z_ref = float(derivation.get("z_ref") or PROFILE.target_height)
     STANCE_THRESH.update(
         {
-            "z_threshold": derivation["z_threshold"],
-            "slip_threshold": derivation["slip_threshold"],
-            "z_ref": derivation["z_ref"],
+            "z_threshold": z_thr,
+            "slip_threshold": slip_thr,
+            "z_ref": z_ref,
             "n": int(derivation.get("n_nominal") or 0),
             "derivation": derivation,
         }
     )
-    STANCE_REF["z"] = float(derivation["z_ref"])
-    print(
-        f"stance_loss thresholds from {source}: "
-        f"z<{derivation['z_threshold']:.4f} m  slip>{derivation['slip_threshold']:.4f} m"
-    )
+    STANCE_REF["z"] = z_ref
+    if getattr(PROFILE, "robot_type", "legged") == "manipulator":
+        ee_lim = getattr(PROFILE, "ee_tracking_limit_m", None)
+        sat_lim = getattr(PROFILE, "saturation_frac_limit", None)
+        tau_lim = getattr(PROFILE, "tau_over_limit_limit", None)
+        ee_txt = "n/a" if ee_lim is None else f"{float(ee_lim):.4f}"
+        sat_txt = "n/a" if sat_lim is None else f"{float(sat_lim):.2f}"
+        tau_txt = "" if tau_lim is None else f"  or max_tau/limit>{float(tau_lim):.3g}"
+        print(
+            f"manipulator thresholds from {source}: "
+            f"ee_tracking_error>{ee_txt} m  saturation_frac>{sat_txt}{tau_txt}"
+        )
+    else:
+        if z_thr is None:
+            z_txt = "n/a"
+        else:
+            z_txt = f"{float(z_thr):.4f}"
+        if slip_thr is None:
+            slip_txt = "n/a"
+        else:
+            slip_txt = f"{float(slip_thr):.4f}"
+        print(
+            f"stance_loss thresholds from {source}: "
+            f"z<{z_txt} m  slip>{slip_txt} m"
+        )
     return derivation
+
+
+def classify_episode_outcome(
+    *,
+    fall: bool,
+    z_after_settle: float,
+    foot_slip: float,
+    n_feet: int,
+    z_thr,
+    slip_thr,
+    z_ref_use,
+    robot_type: str = "legged",
+    ee_tracking_error: float | None = None,
+    ee_limit: float | None = None,
+    saturation_frac: float | None = None,
+    saturation_frac_limit: float | None = None,
+    max_tau_over_limit: float | None = None,
+    tau_over_limit_limit: float | None = None,
+) -> dict:
+    """Legged: fall OR stance_loss. Manipulator: end-effector error or sustained saturation."""
+    stance_loss = False
+    degradation = False
+    fail_reason = "fall" if fall else None
+    slip_checked = robot_type != "manipulator" and int(n_feet) > 0
+    if robot_type != "manipulator" and not fall:
+        z_bad = z_thr is not None and z_after_settle < float(z_thr)
+        slip_bad = (
+            slip_checked
+            and slip_thr is not None
+            and float(foot_slip) > float(slip_thr)
+        )
+        if z_bad or slip_bad:
+            stance_loss = True
+            fail_reason = "stance_loss"
+        elif (
+            z_ref_use is not None
+            and float(z_ref_use) > 1e-9
+            and z_after_settle < (1.0 - DEGRADATION_FRAC) * float(z_ref_use)
+        ):
+            degradation = True
+            fail_reason = None
+    ee_fail = (
+        robot_type == "manipulator"
+        and ee_limit is not None
+        and ee_tracking_error is not None
+        and float(ee_tracking_error) > float(ee_limit)
+    )
+    frac_bad = (
+        robot_type == "manipulator"
+        and saturation_frac_limit is not None
+        and saturation_frac is not None
+        and float(saturation_frac) > float(saturation_frac_limit)
+    )
+    peak_bad = (
+        robot_type == "manipulator"
+        and tau_over_limit_limit is not None
+        and max_tau_over_limit is not None
+        and float(max_tau_over_limit) > float(tau_over_limit_limit)
+    )
+    torque_fail = bool(frac_bad or peak_bad)
+    if fail_reason is None and ee_fail:
+        fail_reason = "ee_tracking_error"
+    elif fail_reason is None and torque_fail:
+        fail_reason = "torque_saturation"
+    failed = bool(fall or stance_loss or ee_fail or torque_fail)
+    return {
+        "failed": failed,
+        "fail_reason": fail_reason,
+        "stance_loss": stance_loss,
+        "degradation": degradation,
+        "ee_fail": ee_fail,
+        "torque_fail": torque_fail,
+        "slip_checked": slip_checked,
+    }
 
 
 def torque_level_stats(batch: dict) -> dict:
@@ -5093,10 +5277,24 @@ def main() -> None:
     torso_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, torso_body_id) or ""
     friction_geoms = [floor_id] + [geom_id for geom_id in foot_ids if geom_id != floor_id]
     print_floor_selection(model, floor_id, foot_ids)
-    print(
-        f"impulse body: id={torso_body_id} name={torso_name!r} "
-        f"xfrc_applied[:, 1], steps {IMPULSE_START}..{IMPULSE_END}"
-    )
+    if PROFILE.impulse_mode == "none":
+        print(
+            f"impulse body: not applied (impulse_mode=none, "
+            f"fixed base {torso_name!r} is left alone)"
+        )
+    elif PROFILE.impulse_mode == "ee":
+        ee_id = end_effector_body_id(model)
+        ee_name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, ee_id) or ""
+        print(
+            f"impulse body: end effector id={ee_id} name={ee_name!r} "
+            f"scale={PROFILE.impulse_force_scale:g}, "
+            f"steps {IMPULSE_START}..{IMPULSE_END}"
+        )
+    else:
+        print(
+            f"impulse body: id={torso_body_id} name={torso_name!r} "
+            f"xfrc_applied[:, 1], steps {IMPULSE_START}..{IMPULSE_END}"
+        )
     print(f"run mode: {run_mode}")
     print(f"scenario: {scenario['id']} — {scenario['label']}")
     print(
@@ -5105,6 +5303,9 @@ def main() -> None:
     )
     print(f"main PD: {pd_name} kp={main_kp:g} kd={main_kd:g}")
     print(f"controller: {ACTIVE_CONTROLLER}")
+    print(
+        f"robot_type: {PROFILE.robot_type}  impulse_mode: {PROFILE.impulse_mode}"
+    )
     n_episodes = max(1, int(args.episodes))
     print(
         f"seed={SEED}  N_ENVS={N_ENVS}  CHUNK_SIZE={CHUNK_SIZE}  "

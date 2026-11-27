@@ -21,6 +21,9 @@
   "fall_height": 0.2,
   "contact_z": 0.12,
   "tilt_fail_deg": 45,
+  "robot_type": "legged",
+  "impulse_mode": "base",
+  "use_global_outcome_thresholds": true,
   "outcome_thresholds": {
     "z_ref": 0.2440828391927459,
     "z_settle_mean": 0.24363440479537132,

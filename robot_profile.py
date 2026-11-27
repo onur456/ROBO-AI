@@ -7,6 +7,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 _URDF_MOTION_TYPES = {"revolute", "continuous", "prismatic", "hinge", "slide"}
+_ROBOT_TYPES = {"legged", "manipulator"}
+_IMPULSE_MODES = {"base", "none", "ee"}
 
 
 def resolve_config_path(path: str | Path) -> Path:
@@ -89,10 +91,60 @@ class RobotProfile:
         self.hip_actuator = str(raw.get("hip_actuator") or self.joint_names[0])
         calf_index = 2 if len(self.joint_names) > 2 else len(self.joint_names) - 1
         self.calf_actuator = str(raw.get("calf_actuator") or self.joint_names[calf_index])
+        self.robot_type = _robot_type(raw, is_urdf)
+        self.use_global_outcome_thresholds = _use_global_thresholds(raw, self.config_path)
+        self.impulse_mode = _impulse_mode(raw, self.robot_type)
+        self.impulse_force_scale = _float_field(raw, "impulse_force_scale", 1.0)
+        self.ee_tracking_limit_m = _optional_float(
+            raw, "ee_tracking_limit_m", 0.05 if self.robot_type == "manipulator" else None
+        )
+        self.saturation_frac_limit = _optional_float(
+            raw, "saturation_frac_limit", 0.9 if self.robot_type == "manipulator" else None
+        )
+        self.tau_over_limit_limit = _optional_float(raw, "tau_over_limit_limit", None)
         thresholds = raw.get("outcome_thresholds") or {}
         self.outcome_thresholds = dict(thresholds)
         self.z_threshold = thresholds.get("z_threshold")
         self.slip_threshold = thresholds.get("slip_threshold")
+
+
+def _robot_type(raw: dict, is_urdf: bool) -> str:
+    listed = raw.get("robot_type", raw.get("kind"))
+    if listed is not None and str(listed).strip():
+        kind = str(listed).strip().lower()
+        if kind not in _ROBOT_TYPES:
+            raise ValueError(
+                f"robot_type must be one of {sorted(_ROBOT_TYPES)}, got {listed!r}"
+            )
+        return kind
+    if is_urdf:
+        return "manipulator"
+    return "legged"
+
+
+def _use_global_thresholds(raw: dict, config_path: Path) -> bool:
+    """Go2's calibrated file is the default only for the Go2 profile."""
+    if "use_global_outcome_thresholds" in raw and raw["use_global_outcome_thresholds"] is not None:
+        return bool(raw["use_global_outcome_thresholds"])
+    return config_path.stem.lower() == "go2"
+
+
+def _impulse_mode(raw: dict, robot_type: str) -> str:
+    listed = raw.get("impulse_mode")
+    if listed is None or not str(listed).strip():
+        return "none" if robot_type == "manipulator" else "base"
+    mode = str(listed).strip().lower()
+    if mode not in _IMPULSE_MODES:
+        raise ValueError(
+            f"impulse_mode must be one of {sorted(_IMPULSE_MODES)}, got {listed!r}"
+        )
+    return mode
+
+
+def _optional_float(raw: dict, key: str, default: float | None) -> float | None:
+    if key not in raw or raw[key] is None:
+        return None if default is None else float(default)
+    return float(raw[key])
 
 
 def _float_field(raw: dict, key: str, default: float | None) -> float:

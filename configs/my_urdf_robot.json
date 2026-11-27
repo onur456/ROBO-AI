@@ -4,5 +4,9 @@
   "target_height": 0.5,
   "fall_height": 0.2,
   "contact_z": 0.05,
-  "tilt_fail_deg": 45
+  "tilt_fail_deg": 45,
+  "robot_type": "manipulator",
+  "impulse_mode": "none",
+  "use_global_outcome_thresholds": false,
+  "ee_tracking_limit_m": 0.05
 }

@@ -706,14 +706,30 @@ def save_uploaded_file(uploaded, dest: Path) -> Path:
     return dest
 
 
+def _compiled_model(model_path: Path):
+    import mujoco
+
+    try:
+        return mujoco.MjModel.from_xml_path(str(model_path))
+    except Exception as exc:
+        raise ValueError(f"Could not read {model_path.name}: {exc}") from exc
+
+
+def mjcf_robot_type(model) -> str:
+    """A floating base is legged. A fixed base is a manipulator."""
+    import mujoco
+
+    free = int(mujoco.mjtJoint.mjJNT_FREE)
+    if int(model.njnt) > 0 and int(model.jnt_type[0]) == free:
+        return "legged"
+    return "manipulator"
+
+
 def mjcf_actuator_names(model_path: Path) -> list[str]:
     """Actuator names compiled by MuJoCo, including files pulled in with include."""
     import mujoco
 
-    try:
-        model = mujoco.MjModel.from_xml_path(str(model_path))
-    except Exception as exc:
-        raise ValueError(f"Could not read {model_path.name}: {exc}") from exc
+    model = _compiled_model(model_path)
     names = [
         mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, index) or ""
         for index in range(int(model.nu))
@@ -731,8 +747,17 @@ def write_uploaded_profile(model_path: Path, dest: Path) -> Path:
         "contact_z": 0.12,
         "tilt_fail_deg": 45,
     }
-    if model_path.suffix.lower() != ".urdf":
-        names = mjcf_actuator_names(model_path)
+    if model_path.suffix.lower() == ".urdf":
+        payload["robot_type"] = "manipulator"
+    else:
+        import mujoco
+
+        model = _compiled_model(model_path)
+        names = [
+            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, index) or ""
+            for index in range(int(model.nu))
+        ]
+        names = [name for name in names if name]
         if not names:
             raise ValueError(
                 f"No actuators found in {model_path.name}. "
@@ -740,6 +765,7 @@ def write_uploaded_profile(model_path: Path, dest: Path) -> Path:
             )
         payload["joint_names"] = names
         payload["num_motors"] = len(names)
+        payload["robot_type"] = mjcf_robot_type(model)
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return dest
