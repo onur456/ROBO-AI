@@ -6,6 +6,7 @@ import argparse
 import ast
 import json
 import math
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from client_report import client_summary, client_text
 from paired_compare import BETTER, NO_PAIR, NOISE, WORSE, compare_runs
 from step3_batch_stress import wilson_ci
 
@@ -424,10 +426,12 @@ def render_episode(frame: pd.DataFrame) -> None:
         return
 
     labels = [episode_label(row) for _, row in frame.iterrows()]
+    if st.session_state.get("episode_choice") not in labels:
+        st.session_state["episode_choice"] = labels[0]
     choice = st.selectbox(
         "Episode, search by seed",
         options=labels,
-        index=0,
+        key="episode_choice",
         help="Type a seed, parameter, or level to filter the list.",
     )
     row = frame.iloc[labels.index(choice)]
@@ -450,9 +454,91 @@ def render_episode(frame: pd.DataFrame) -> None:
     )
 
 
+def render_queue_compare() -> None:
+    """McNemar and Holm on two finished queue reports. The math stays in paired_compare."""
+    import job_queue
+
+    done = [
+        job
+        for job in job_queue.list_jobs()
+        if job.get("state") == "done" and Path(str(job.get("report_path") or "")).is_file()
+    ]
+    st.markdown("**Compare two finished runs**")
+    if len(done) < 2:
+        st.caption("Two finished queue runs are needed before they can be compared.")
+        return
+    options = {
+        f"{job['id']} · {job.get('label') or 'robot'}": job
+        for job in done
+    }
+    names = list(options)
+    left, right = st.columns(2, vertical_alignment="bottom")
+    with left:
+        choice_a = st.selectbox("Run A (before)", names, index=0, key="queue_compare_a")
+    with right:
+        choice_b = st.selectbox("Run B (after)", names, index=min(1, len(names) - 1), key="queue_compare_b")
+    if not st.button("Compare these runs", key="queue_compare_btn"):
+        return
+    if choice_a == choice_b:
+        st.error("Pick two different runs.")
+        return
+    try:
+        result = compare_runs(
+            _load_json(Path(options[choice_a]["report_path"])),
+            _load_json(Path(options[choice_b]["report_path"])),
+        )
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        st.error(f"Could not compare the runs: {exc}")
+        return
+    shown: list[str] = []
+    for note in result.get("warnings") or []:
+        if note in shown:
+            continue
+        shown.append(note)
+        st.warning(display_warning(note))
+    table = comparison_table(result)
+    if table.empty:
+        st.info("No comparable levels.")
+        return
+    st.dataframe(table.style.map(_verdict_color, subset=["Verdict"]), width="stretch")
+
+
+def render_client_report(summary_frame: pd.DataFrame, episode_frame: pd.DataFrame) -> None:
+    """What failed, under which disturbance, and how to replay that seed."""
+    st.subheader("Client report")
+    records = summary_frame.to_dict("records") if not summary_frame.empty else []
+    summary = client_summary(records)
+    with st.container(border=True):
+        st.write(client_text(summary))
+        example = summary.get("example") or {}
+        if example.get("episode") is not None and example.get("seed") is not None:
+            st.code(reproduce_command(pd.Series(example)), language="bash")
+            label = None
+            if (
+                not episode_frame.empty
+                and "seed" in episode_frame.columns
+                and "episode" in episode_frame.columns
+            ):
+                matched = episode_frame[
+                    (episode_frame["seed"] == example["seed"])
+                    & (episode_frame["episode"] == example["episode"])
+                ]
+                if not matched.empty:
+                    label = episode_label(matched.iloc[0])
+            if label is None:
+                st.caption("Clear the outcome filter to open this seed in the episode list.")
+            elif st.button("Replay this seed", key="replay_seed"):
+                st.session_state["episode_choice"] = label
+        render_queue_compare()
+
+
 def render_batch_tab() -> None:
+    queued_report = st.session_state.pop("queue_report_path", None)
     if st.session_state.pop("batch_refresh", False):
         st.session_state["batch_json_path"] = "reports/batch_failures.json"
+        st.session_state.pop("batch_params", None)
+    if queued_report:
+        st.session_state["batch_json_path"] = queued_report
         st.session_state.pop("batch_params", None)
     filepath = st.sidebar.text_input(
         "JSON path",
@@ -494,6 +580,7 @@ def render_batch_tab() -> None:
         )
     else:
         render_metrics(filtered)
+    render_client_report(by_param, filtered)
     render_param_chart(by_param)
     render_heatmap(by_param)
     render_episode(filtered)
@@ -715,16 +802,6 @@ def _compiled_model(model_path: Path):
         raise ValueError(f"Could not read {model_path.name}: {exc}") from exc
 
 
-def mjcf_robot_type(model) -> str:
-    """A floating base is legged. A fixed base is a manipulator."""
-    import mujoco
-
-    free = int(mujoco.mjtJoint.mjJNT_FREE)
-    if int(model.njnt) > 0 and int(model.jnt_type[0]) == free:
-        return "legged"
-    return "manipulator"
-
-
 def mjcf_actuator_names(model_path: Path) -> list[str]:
     """Actuator names compiled by MuJoCo, including files pulled in with include."""
     import mujoco
@@ -737,35 +814,29 @@ def mjcf_actuator_names(model_path: Path) -> list[str]:
     return [name for name in names if name]
 
 
-def write_uploaded_profile(model_path: Path, dest: Path) -> Path:
+def write_uploaded_profile(
+    model_path: Path,
+    dest: Path,
+    task: str | None = None,
+    *,
+    target_height: float | None = None,
+    ee_tracking_limit_m: float | None = None,
+    saturation_frac_limit: float | None = None,
+    kp: float | None = None,
+    kd: float | None = None,
+) -> Path:
     """Profile JSON the batch runner already understands."""
-    payload: dict = {
-        "name": model_path.stem,
-        "model_path": str(model_path.resolve()),
-        "target_height": 0.5,
-        "fall_height": 0.2,
-        "contact_z": 0.12,
-        "tilt_fail_deg": 45,
-    }
-    if model_path.suffix.lower() == ".urdf":
-        payload["robot_type"] = "manipulator"
-    else:
-        import mujoco
+    from robot_package import build_package
 
-        model = _compiled_model(model_path)
-        names = [
-            mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_ACTUATOR, index) or ""
-            for index in range(int(model.nu))
-        ]
-        names = [name for name in names if name]
-        if not names:
-            raise ValueError(
-                f"No actuators found in {model_path.name}. "
-                "A URDF without motors can still run; an MJCF needs actuator names."
-            )
-        payload["joint_names"] = names
-        payload["num_motors"] = len(names)
-        payload["robot_type"] = mjcf_robot_type(model)
+    payload = build_package(
+        model_path,
+        task,
+        target_height=target_height,
+        ee_tracking_limit_m=ee_tracking_limit_m,
+        saturation_frac_limit=saturation_frac_limit,
+        kp=kp,
+        kd=kd,
+    )
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return dest
@@ -831,8 +902,27 @@ def run_stress_backend(
     test_friction: bool = True,
     test_impact: bool = True,
     report_path: Path | None = None,
+    task: str | None = None,
+    target_height: float | None = None,
+    ee_tracking_limit_m: float | None = None,
+    saturation_frac_limit: float | None = None,
+    kp: float | None = None,
+    kd: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    profile_path = write_uploaded_profile(model_path, ROOT / "temp" / "uploaded_profile.json")
+    from robot_package import validate_profile
+    from robot_profile import RobotProfile
+
+    profile_path = write_uploaded_profile(
+        model_path,
+        ROOT / "temp" / "uploaded_profile.json",
+        task,
+        target_height=target_height,
+        ee_tracking_limit_m=ee_tracking_limit_m,
+        saturation_frac_limit=saturation_frac_limit,
+        kp=kp,
+        kd=kd,
+    )
+    validate_profile(RobotProfile(profile_path))
     controller = "pd" if controller_path is None else controller_spec_for(controller_path)
     report = ROOT / "reports" / "batch_failures.json" if report_path is None else report_path
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -846,6 +936,71 @@ def run_stress_backend(
     return subprocess.run(command, cwd=ROOT, capture_output=True, text=True)
 
 
+def enqueue_stress_job(
+    model_path: Path,
+    episodes: int,
+    *,
+    controller_path: Path | None = None,
+    test_friction: bool = True,
+    test_impact: bool = True,
+    task: str | None = None,
+    target_height: float | None = None,
+    ee_tracking_limit_m: float | None = None,
+    saturation_frac_limit: float | None = None,
+    kp: float | None = None,
+    kd: float | None = None,
+    start_runner: bool = True,
+) -> dict:
+    """Validate the package, then leave a queued job. The page does not wait for MuJoCo."""
+    from robot_package import validate_profile
+    from robot_profile import RobotProfile
+
+    import job_queue
+
+    job_id = job_queue.new_job_id()
+    folder = job_queue.job_dir(job_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        model_copy = folder / Path(model_path).name
+        shutil.copy2(model_path, model_copy)
+        controller_copy = None
+        if controller_path is not None:
+            controller_copy = folder / Path(controller_path).name
+            shutil.copy2(controller_path, controller_copy)
+        profile_path = write_uploaded_profile(
+            model_copy,
+            folder / "profile.json",
+            task,
+            target_height=target_height,
+            ee_tracking_limit_m=ee_tracking_limit_m,
+            saturation_frac_limit=saturation_frac_limit,
+            kp=kp,
+            kd=kd,
+        )
+        validate_profile(RobotProfile(profile_path))
+        controller = "pd" if controller_copy is None else controller_spec_for(controller_copy)
+        report = folder / "report.json"
+        job = job_queue.blank_job(
+            job_id=job_id,
+            episodes=episodes,
+            argv=simulation_command(
+                profile_path,
+                episodes,
+                stress_scenario(test_friction, test_impact),
+                controller,
+                report,
+            ),
+            report_path=report,
+            progress_path=folder / "progress.json",
+            log_path=folder / "log.txt",
+            label=Path(model_path).name,
+        )
+        return job_queue.enqueue_record(job, start_runner=start_runner)
+    except Exception:
+        shutil.rmtree(folder, ignore_errors=True)
+        raise
+
+
 def estimated_price(episodes: int) -> float:
     """100 episodes cost $5 and 1000 cost $20, linearly in between."""
     return 5.0 + (int(episodes) - 100) * (15.0 / 900.0)
@@ -856,6 +1011,45 @@ def format_estimated_price(episodes: int) -> str:
     if abs(price - round(price)) < 1e-9:
         return f"${price:.0f}"
     return f"${price:.2f}"
+
+
+@st.fragment(run_every="2s")
+def render_job_queue() -> None:
+    """Status only. Scheduling happens in the queue runner, not in this page."""
+    import job_queue
+
+    jobs = job_queue.list_jobs()
+    if any(job.get("state") in {"queued", "running"} for job in jobs):
+        try:
+            job_queue.ensure_runner()
+        except OSError as exc:
+            st.error(f"Queue runner did not start: {exc}")
+            return
+    cap = job_queue.worker_cap()
+    used = sum(int(job.get("workers_assigned") or 0) for job in jobs if job.get("state") == "running")
+    st.caption(f"Queue · MuJoCo workers {used} / {cap}")
+    seen = st.session_state.setdefault("queue_seen", {})
+    opened_report = False
+    for job in jobs:
+        previous = seen.get(job["id"])
+        if job.get("state") == "done" and previous in {"queued", "running"}:
+            st.session_state["queue_report_path"] = job["report_path"]
+            opened_report = True
+        seen[job["id"]] = job.get("state")
+    if not jobs:
+        st.caption("No jobs yet.")
+        return
+    for job in reversed(jobs[-8:]):
+        done = int(job.get("progress_done") or 0)
+        total = int(job.get("progress_total") or job.get("episodes") or 0)
+        label = f"{job['id']} · {job.get('label') or 'robot'} · {job.get('state')} · {done}/{total}"
+        st.write(label)
+        if job.get("state") == "running" and total > 0:
+            st.progress(min(1.0, done / total))
+        if job.get("state") == "error" and job.get("error"):
+            st.error(str(job["error"]))
+    if opened_report:
+        st.rerun()
 
 
 def render_stress_config() -> None:
@@ -880,6 +1074,73 @@ def render_stress_config() -> None:
     if controller_file is not None:
         controller_path = save_uploaded_file(
             controller_file, ROOT / "temp" / "uploaded_controller.py"
+        )
+    task = st.segmented_control(
+        "Task",
+        ["stance", "track_ee"],
+        default="stance",
+        required=True,
+        format_func=lambda item: "Stance" if item == "stance" else "End-effector tracking",
+        key="stress_task",
+    )
+    target_height = None
+    ee_limit = None
+    sat_limit = None
+    if task == "track_ee":
+        limit_col, sat_col = st.columns(2)
+        with limit_col:
+            ee_limit = float(
+                st.number_input(
+                    "End-effector error limit, m",
+                    min_value=0.001,
+                    value=0.05,
+                    step=0.005,
+                    format="%.3f",
+                    key="stress_ee_limit",
+                )
+            )
+        with sat_col:
+            sat_limit = float(
+                st.number_input(
+                    "Saturation fraction limit",
+                    min_value=0.05,
+                    max_value=1.0,
+                    value=0.9,
+                    step=0.05,
+                    key="stress_sat_limit",
+                )
+            )
+    else:
+        target_height = float(
+            st.number_input(
+                "Target height, m",
+                min_value=0.01,
+                value=0.25,
+                step=0.01,
+                format="%.3f",
+                key="stress_height",
+            )
+        )
+    gain_col, damp_col = st.columns(2)
+    with gain_col:
+        kp = float(
+            st.number_input(
+                "PD kp",
+                min_value=0.1,
+                value=40.0,
+                step=1.0,
+                key="stress_kp",
+            )
+        )
+    with damp_col:
+        kd = float(
+            st.number_input(
+                "PD kd",
+                min_value=0.1,
+                value=3.0,
+                step=0.5,
+                key="stress_kd",
+            )
         )
     count_col, price_col = st.columns([3, 1], vertical_alignment="bottom")
     with count_col:
@@ -924,25 +1185,25 @@ def render_stress_config() -> None:
         if model_path is None:
             st.error("Upload a robot model (.xml or .urdf) before running the simulation.")
         else:
-            report_path = ROOT / "reports" / "batch_failures.json"
             try:
-                with st.spinner("Running simulations on backend..."):
-                    result = run_stress_backend(
-                        model_path,
-                        episodes,
-                        controller_path=controller_path,
-                        test_friction=bool(test_friction),
-                        test_impact=bool(test_impact),
-                        report_path=report_path,
-                    )
+                job = enqueue_stress_job(
+                    model_path,
+                    episodes,
+                    controller_path=controller_path,
+                    test_friction=bool(test_friction),
+                    test_impact=bool(test_impact),
+                    task=task,
+                    target_height=target_height,
+                    ee_tracking_limit_m=ee_limit,
+                    saturation_frac_limit=sat_limit,
+                    kp=kp,
+                    kd=kd,
+                )
             except (OSError, ValueError) as exc:
                 st.error(str(exc))
             else:
-                if result.returncode != 0 or not report_path.is_file():
-                    st.error(process_error_text(result))
-                else:
-                    st.session_state["batch_refresh"] = True
-                    st.success("Simulations complete! Results are ready below.")
+                st.success(f"Queued {job['id']}. The run continues in the background.")
+    render_job_queue()
 
 
 def render_workspace() -> None:

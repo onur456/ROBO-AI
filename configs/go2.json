@@ -21,6 +21,8 @@
   "fall_height": 0.2,
   "contact_z": 0.12,
   "tilt_fail_deg": 45,
+  "kp": 40,
+  "kd": 3,
   "robot_type": "legged",
   "impulse_mode": "base",
   "use_global_outcome_thresholds": true,

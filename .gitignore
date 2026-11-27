@@ -9,6 +9,9 @@ reports/
 # Uploaded models and controllers
 temp/
 
+# Job queue (profiles, logs, per-job reports)
+queue/
+
 # Byte-compiled / cache
 __pycache__/
 *.py[cod]

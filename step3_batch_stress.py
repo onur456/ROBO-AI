@@ -6,7 +6,7 @@ import math
 import os
 import time
 from collections import deque
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +15,7 @@ import mujoco
 
 import controllers
 from controllers import JointPDController, make_controller, prepare_controller_spec
+from robot_package import PackageError, validate_profile
 from robot_profile import RobotProfile
 
 DEFAULT_CONFIG = Path(__file__).resolve().parent / "configs" / "go2.json"
@@ -24,6 +25,8 @@ N_ENVS = 80
 N_EPISODES = N_ENVS
 N_SWEEP_EPISODES = 50
 CHUNK_SIZE = 10
+MAX_POOL_WORKERS: int | None = None
+PROGRESS_PATH: str | None = None
 MAX_STEPS = 1500
 WINDOW_SIZE = 200
 SAG_Z = float(PROFILE.fall_height)
@@ -419,6 +422,30 @@ PD_MODES = {
     "stiff": {"kp": 40.0, "kd": 3.0},
     "weak_pd": {"kp": 25.0, "kd": 1.5},
 }
+def resolve_pd(profile, pd_name: str = "baseline") -> tuple[float, float]:
+    """Baseline gains come from the profile. Named CLI modes keep their own table."""
+    if pd_name == "baseline" and getattr(profile, "kp", None) is not None and getattr(profile, "kd", None) is not None:
+        return float(profile.kp), float(profile.kd)
+    mode = PD_MODES[pd_name]
+    return float(mode["kp"]), float(mode["kd"])
+
+
+def uses_quadruped_failure(task: str | None, robot_type: str) -> bool:
+    """Height, tilt, and foot slip are the stance check for a legged robot."""
+    if task == "track_ee":
+        return False
+    return robot_type != "manipulator"
+
+
+def uses_ee_failure(task: str | None, robot_type: str) -> bool:
+    """End-effector error and saturation belong to the track_ee task."""
+    if task == "stance":
+        return False
+    if task == "track_ee":
+        return True
+    return robot_type == "manipulator"
+
+
 MAIN_MODE = "baseline"
 ACTIVE_CONTROLLER = "pd"
 STANCE_REF = {"z": None, "frac": STANCE_LOSS_FRAC, "kp": None, "kd": None}
@@ -537,6 +564,17 @@ def parse_args() -> argparse.Namespace:
             "where to write the batch JSON. Without the flag, reports/batch_failures.json. "
             "A new path is not merged into the main report"
         ),
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help="cap the MuJoCo process pool for this run (default: one worker per chunk, up to the CPU count)",
+    )
+    parser.add_argument(
+        "--progress",
+        default=None,
+        help="JSON file updated with done and total episode counts while the batch runs",
     )
     return parser.parse_args()
 
@@ -1742,7 +1780,10 @@ def simulate_episode(
         ee_body_id = None
         ee_origin = None
         ee_tracking_error = 0.0
-        if getattr(PROFILE, "robot_type", "legged") == "manipulator":
+        if uses_ee_failure(
+            getattr(PROFILE, "task", None),
+            getattr(PROFILE, "robot_type", "legged"),
+        ):
             ee_body_id = end_effector_body_id(model)
             ee_origin = np.array(data.xpos[ee_body_id], dtype=float)
         policy = (
@@ -1862,12 +1903,16 @@ def simulate_episode(
             else:
                 settle_count = 0
             reason = None
-            if z < CONTACT_Z:
-                reason = "contact_z"
-            elif abs(roll) > TILT_FAIL_RAD or abs(pitch) > TILT_FAIL_RAD:
-                reason = "tilt"
-            elif upright_count >= upright_needed:
-                reason = "upright_hold"
+            if uses_quadruped_failure(
+                getattr(PROFILE, "task", None),
+                getattr(PROFILE, "robot_type", "legged"),
+            ):
+                if z < CONTACT_Z:
+                    reason = "contact_z"
+                elif abs(roll) > TILT_FAIL_RAD or abs(pitch) > TILT_FAIL_RAD:
+                    reason = "tilt"
+                elif upright_count >= upright_needed:
+                    reason = "upright_hold"
             if reason is not None:
                 fail_step = step
                 fail_reason = reason
@@ -1896,7 +1941,9 @@ def simulate_episode(
     slip_thr = STANCE_THRESH.get("slip_threshold")
     z_ref_use = z_ref if z_ref is not None else STANCE_THRESH.get("z_ref")
     robot_type = str(getattr(PROFILE, "robot_type", "legged"))
+    task = getattr(PROFILE, "task", None)
     sat_frac = (sat_steps / len(zs)) if zs else 0.0
+    track_ee = uses_ee_failure(task, robot_type)
     outcome = classify_episode_outcome(
         fall=fall,
         z_after_settle=z_after_settle,
@@ -1906,7 +1953,8 @@ def simulate_episode(
         slip_thr=slip_thr,
         z_ref_use=z_ref_use,
         robot_type=robot_type,
-        ee_tracking_error=ee_tracking_error if robot_type == "manipulator" else None,
+        task=task,
+        ee_tracking_error=ee_tracking_error if track_ee else None,
         ee_limit=getattr(PROFILE, "ee_tracking_limit_m", None),
         saturation_frac=sat_frac,
         saturation_frac_limit=getattr(PROFILE, "saturation_frac_limit", None),
@@ -2860,6 +2908,26 @@ def merge_batch_parts(parts: list[dict], kp: float, kd: float) -> dict:
     )
 
 
+def pool_worker_count(n_chunks: int) -> int:
+    """Workers for one batch. A set cap is shared with the job queue."""
+    cpu = os.cpu_count() or 1
+    count = min(max(1, int(n_chunks)), cpu)
+    if MAX_POOL_WORKERS is not None:
+        count = min(count, max(1, int(MAX_POOL_WORKERS)))
+    return count
+
+
+def write_batch_progress(done: int, total: int) -> None:
+    if not PROGRESS_PATH:
+        return
+    target = Path(PROGRESS_PATH)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"done": int(done), "total": int(total)}
+    temporary = target.with_suffix(target.suffix + ".tmp")
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(temporary, target)
+
+
 def run_stress_batch_parallel(
     specs: list[tuple[int, float, float]],
     kp: float,
@@ -2869,7 +2937,7 @@ def run_stress_batch_parallel(
     factor: dict | None = None,
 ) -> dict:
     chunks = split_chunks(specs, CHUNK_SIZE)
-    n_workers = min(len(chunks), os.cpu_count() or 1)
+    n_workers = pool_worker_count(len(chunks))
     controller_spec = controllers.canonical_controller_spec(ACTIVE_CONTROLLER)
     import_root = controllers.CONTROLLER_IMPORT_ROOT
     payloads = [
@@ -2891,12 +2959,23 @@ def run_stress_batch_parallel(
         for chunk in chunks
     ]
     started = time.perf_counter()
+    total_episodes = sum(len(payload["specs"]) for payload in payloads)
+    write_batch_progress(0, total_episodes)
     use_pool = len(chunks) > 1
+    parts: list[dict] = []
+    done_episodes = 0
     if not use_pool:
         parts = [_run_chunk(payload) for payload in payloads]
+        done_episodes = total_episodes
+        write_batch_progress(done_episodes, total_episodes)
     else:
         with ProcessPoolExecutor(max_workers=max(1, n_workers)) as pool:
-            parts = list(pool.map(_run_chunk, payloads))
+            futures = {pool.submit(_run_chunk, payload): payload for payload in payloads}
+            for future in as_completed(futures):
+                part = future.result()
+                parts.append(part)
+                done_episodes += len(part.get("episodes") or futures[future]["specs"])
+                write_batch_progress(done_episodes, total_episodes)
     elapsed = time.perf_counter() - started
     batch = merge_batch_parts(parts, kp, kd)
     batch["elapsed_s"] = float(elapsed)
@@ -5005,6 +5084,7 @@ def classify_episode_outcome(
     slip_thr,
     z_ref_use,
     robot_type: str = "legged",
+    task: str | None = None,
     ee_tracking_error: float | None = None,
     ee_limit: float | None = None,
     saturation_frac: float | None = None,
@@ -5012,12 +5092,14 @@ def classify_episode_outcome(
     max_tau_over_limit: float | None = None,
     tau_over_limit_limit: float | None = None,
 ) -> dict:
-    """Legged: fall OR stance_loss. Manipulator: end-effector error or sustained saturation."""
+    """Stance uses fall or stance_loss. track_ee uses end-effector error or saturation."""
     stance_loss = False
     degradation = False
     fail_reason = "fall" if fall else None
-    slip_checked = robot_type != "manipulator" and int(n_feet) > 0
-    if robot_type != "manipulator" and not fall:
+    quadruped = uses_quadruped_failure(task, robot_type)
+    track = uses_ee_failure(task, robot_type)
+    slip_checked = quadruped and int(n_feet) > 0
+    if quadruped and not fall:
         z_bad = z_thr is not None and z_after_settle < float(z_thr)
         slip_bad = (
             slip_checked
@@ -5035,19 +5117,19 @@ def classify_episode_outcome(
             degradation = True
             fail_reason = None
     ee_fail = (
-        robot_type == "manipulator"
+        track
         and ee_limit is not None
         and ee_tracking_error is not None
         and float(ee_tracking_error) > float(ee_limit)
     )
     frac_bad = (
-        robot_type == "manipulator"
+        track
         and saturation_frac_limit is not None
         and saturation_frac is not None
         and float(saturation_frac) > float(saturation_frac_limit)
     )
     peak_bad = (
-        robot_type == "manipulator"
+        track
         and tau_over_limit_limit is not None
         and max_tau_over_limit is not None
         and float(max_tau_over_limit) > float(tau_over_limit_limit)
@@ -5237,7 +5319,7 @@ def run_torque_limit_test(
 
 
 def main() -> None:
-    global ACTIVE_CONTROLLER, REPORT_PATH
+    global ACTIVE_CONTROLLER, REPORT_PATH, MAX_POOL_WORKERS, PROGRESS_PATH
     args = parse_args()
     apply_robot_profile(RobotProfile(args.config))
     if args.report:
@@ -5247,12 +5329,21 @@ def main() -> None:
 
         run_compare_files(args.compare[0], args.compare[1], args.compare_out)
         return
+    try:
+        validate_profile(PROFILE)
+    except PackageError as exc:
+        print(f"Package check failed:\n{exc}")
+        raise SystemExit(1)
+    if args.max_workers is not None and int(args.max_workers) < 1:
+        print("Error: --max-workers must be at least 1")
+        raise SystemExit(2)
+    MAX_POOL_WORKERS = None if args.max_workers is None else int(args.max_workers)
+    PROGRESS_PATH = args.progress
     run_mode = args.mode
     pd_name = args.pd
     scenario = SCENARIOS[args.scenario]
-    mode = PD_MODES[pd_name]
-    main_kp = float(mode["kp"])
-    main_kd = float(mode["kd"])
+    ref_kp, ref_kd = resolve_pd(PROFILE, "baseline")
+    main_kp, main_kd = resolve_pd(PROFILE, pd_name)
     ACTIVE_CONTROLLER, _import_root = prepare_controller_spec(str(args.controller))
     make_controller(ACTIVE_CONTROLLER, main_kp, main_kd)
 
@@ -5306,6 +5397,7 @@ def main() -> None:
     print(
         f"robot_type: {PROFILE.robot_type}  impulse_mode: {PROFILE.impulse_mode}"
     )
+    print(f"task: {PROFILE.task}  package_version: {PROFILE.package_version}")
     n_episodes = max(1, int(args.episodes))
     print(
         f"seed={SEED}  N_ENVS={N_ENVS}  CHUNK_SIZE={CHUNK_SIZE}  "
@@ -5325,8 +5417,8 @@ def main() -> None:
         target_qpos,
         friction_geoms,
         torso_body_id,
-        float(PD_MODES["baseline"]["kp"]),
-        float(PD_MODES["baseline"]["kd"]),
+        ref_kp,
+        ref_kd,
         float(args.stance_loss_frac),
         announce_frac_rule=(run_mode not in ("criteria", "torque", "ofat")),
     )

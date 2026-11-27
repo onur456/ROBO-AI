@@ -206,5 +206,58 @@ class RobotTypeProfileTest(unittest.TestCase):
         self.assertIsNone(legged_tau["fail_reason"])
 
 
+class ContractGainsAndCriteriaTest(unittest.TestCase):
+    def test_go2_baseline_gains_come_from_the_profile(self) -> None:
+        profile = RobotProfile(ROOT / "configs" / "go2.json")
+        self.assertEqual(s3.resolve_pd(profile, "baseline"), (40.0, 3.0))
+        self.assertEqual(s3.resolve_pd(profile, "weak_pd"), (25.0, 1.5))
+
+    def test_profile_gains_replace_the_baseline_table(self) -> None:
+        profile = type("P", (), {"kp": 12.0, "kd": 2.0})()
+        self.assertEqual(s3.resolve_pd(profile, "baseline"), (12.0, 2.0))
+        self.assertEqual(s3.resolve_pd(profile, "weak_pd"), (25.0, 1.5))
+
+    def test_missing_gains_keep_the_baseline_table(self) -> None:
+        profile = type("P", (), {"kp": None, "kd": None})()
+        self.assertEqual(s3.resolve_pd(profile, "baseline"), (40.0, 3.0))
+
+    def test_track_ee_ignores_height_and_slip(self) -> None:
+        self.assertFalse(s3.uses_quadruped_failure("track_ee", "legged"))
+        self.assertTrue(s3.uses_quadruped_failure("stance", "legged"))
+        low = s3.classify_episode_outcome(
+            fall=False,
+            z_after_settle=0.05,
+            foot_slip=1.0,
+            n_feet=4,
+            z_thr=0.4,
+            slip_thr=0.15,
+            z_ref_use=0.625,
+            robot_type="legged",
+            task="track_ee",
+            ee_tracking_error=0.01,
+            ee_limit=0.05,
+            saturation_frac=0.2,
+            saturation_frac_limit=0.9,
+        )
+        self.assertFalse(low["failed"])
+        self.assertIsNone(low["fail_reason"])
+        missed = s3.classify_episode_outcome(
+            fall=False,
+            z_after_settle=0.05,
+            foot_slip=1.0,
+            n_feet=4,
+            z_thr=0.4,
+            slip_thr=0.15,
+            z_ref_use=0.625,
+            robot_type="legged",
+            task="track_ee",
+            ee_tracking_error=0.2,
+            ee_limit=0.05,
+            saturation_frac=0.2,
+            saturation_frac_limit=0.9,
+        )
+        self.assertEqual(missed["fail_reason"], "ee_tracking_error")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -246,6 +246,9 @@ class DashboardSmokeTest(unittest.TestCase):
             write_uploaded_profile(ROOT / "models" / "simple_arm.urdf", urdf_profile)
             urdf_raw = json.loads(urdf_profile.read_text(encoding="utf-8"))
             self.assertEqual(urdf_raw["robot_type"], "manipulator")
+            self.assertEqual(urdf_raw["package_version"], 1)
+            self.assertEqual(urdf_raw["task"], "track_ee")
+            self.assertIn("ee_tracking_limit_m", urdf_raw)
 
             fixed = Path(folder) / "fixed.xml"
             fixed.write_text(
@@ -268,13 +271,14 @@ class DashboardSmokeTest(unittest.TestCase):
             write_uploaded_profile(fixed, fixed_profile)
             fixed_raw = json.loads(fixed_profile.read_text(encoding="utf-8"))
             self.assertEqual(fixed_raw["robot_type"], "manipulator")
+            self.assertEqual(fixed_raw["task"], "track_ee")
 
             floating = Path(folder) / "float.xml"
             floating.write_text(
                 """
                 <mujoco>
                   <worldbody>
-                    <body name="base">
+                    <body name="base" pos="0 0 0.8">
                       <freejoint/>
                       <geom size="0.1"/>
                       <body name="leg">
@@ -294,6 +298,8 @@ class DashboardSmokeTest(unittest.TestCase):
             write_uploaded_profile(floating, float_profile)
             float_raw = json.loads(float_profile.read_text(encoding="utf-8"))
             self.assertEqual(float_raw["robot_type"], "legged")
+            self.assertEqual(float_raw["task"], "stance")
+            self.assertGreater(float(float_raw["target_height"]), 0.0)
 
     def test_bad_model_is_reported_before_the_batch(self) -> None:
         from dashboard.workspace import write_uploaded_profile
@@ -303,6 +309,35 @@ class DashboardSmokeTest(unittest.TestCase):
             broken.write_text("<not-mujoco>", encoding="utf-8")
             with self.assertRaises(ValueError):
                 write_uploaded_profile(broken, Path(folder) / "profile.json")
+
+    def test_enqueue_writes_a_queued_job_without_a_report(self) -> None:
+        import job_queue
+        from dashboard.workspace import enqueue_stress_job
+
+        previous_dir = job_queue.QUEUE_DIR
+        previous_lock = job_queue.LOCK_PATH
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                job_queue.QUEUE_DIR = Path(folder) / "jobs"
+                job_queue.LOCK_PATH = Path(folder) / "jobs.lock"
+                job = enqueue_stress_job(
+                    ROOT / "models" / "simple_arm.urdf",
+                    10,
+                    task="track_ee",
+                    ee_tracking_limit_m=0.05,
+                    saturation_frac_limit=0.9,
+                    kp=40.0,
+                    kd=3.0,
+                    start_runner=False,
+                )
+                self.assertEqual(job["state"], "queued")
+                self.assertEqual(job["workers_wanted"], 1)
+                self.assertFalse(Path(job["report_path"]).is_file())
+                stored = json.loads((job_queue.QUEUE_DIR / f"{job['id']}.json").read_text(encoding="utf-8"))
+                self.assertEqual(stored["state"], "queued")
+        finally:
+            job_queue.QUEUE_DIR = previous_dir
+            job_queue.LOCK_PATH = previous_lock
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from pathlib import Path
 _URDF_MOTION_TYPES = {"revolute", "continuous", "prismatic", "hinge", "slide"}
 _ROBOT_TYPES = {"legged", "manipulator"}
 _IMPULSE_MODES = {"base", "none", "ee"}
+_TASKS = {"stance", "track_ee"}
 
 
 def resolve_config_path(path: str | Path) -> Path:
@@ -69,6 +70,8 @@ class RobotProfile:
         if not self.config_path.is_file():
             raise FileNotFoundError(f"robot profile not found: {config_path}")
         raw = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.raw = raw
+        self.package_version = int(raw.get("package_version") or 0)
         self.model_path = resolve_model_path(str(raw["model_path"]), self.config_path)
         is_urdf = self.model_path.lower().endswith(".urdf")
         listed = raw.get("joint_names")
@@ -92,6 +95,9 @@ class RobotProfile:
         calf_index = 2 if len(self.joint_names) > 2 else len(self.joint_names) - 1
         self.calf_actuator = str(raw.get("calf_actuator") or self.joint_names[calf_index])
         self.robot_type = _robot_type(raw, is_urdf)
+        self.task = _task(raw, self.robot_type, self.package_version)
+        self.kp = _optional_float(raw, "kp", None)
+        self.kd = _optional_float(raw, "kd", None)
         self.use_global_outcome_thresholds = _use_global_thresholds(raw, self.config_path)
         self.impulse_mode = _impulse_mode(raw, self.robot_type)
         self.impulse_force_scale = _float_field(raw, "impulse_force_scale", 1.0)
@@ -120,6 +126,18 @@ def _robot_type(raw: dict, is_urdf: bool) -> str:
     if is_urdf:
         return "manipulator"
     return "legged"
+
+
+def _task(raw: dict, robot_type: str, package_version: int) -> str:
+    listed = raw.get("task")
+    if listed is not None and str(listed).strip():
+        task = str(listed).strip().lower()
+        if task not in _TASKS:
+            raise ValueError(f"task must be one of {sorted(_TASKS)}, got {listed!r}")
+        return task
+    if package_version >= 1:
+        raise ValueError("task is required when package_version is 1")
+    return "track_ee" if robot_type == "manipulator" else "stance"
 
 
 def _use_global_thresholds(raw: dict, config_path: Path) -> bool:
