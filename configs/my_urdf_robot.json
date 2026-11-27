@@ -1,0 +1,8 @@
+{
+  "name": "Simple URDF arm",
+  "model_path": "models/simple_arm.urdf",
+  "target_height": 0.5,
+  "fall_height": 0.2,
+  "contact_z": 0.05,
+  "tilt_fail_deg": 45
+}

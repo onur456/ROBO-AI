@@ -989,6 +989,82 @@ def apply_robot_profile(profile: RobotProfile) -> None:
     TILT_FAIL_RAD = math.radians(float(profile.tilt_fail_deg))
 
 
+def _motion_joint_names(model: mujoco.MjModel) -> list[str]:
+    """Hinge and slide joints a position actuator can drive."""
+    hinge = int(mujoco.mjtJoint.mjJNT_HINGE)
+    slide = int(mujoco.mjtJoint.mjJNT_SLIDE)
+    names: list[str] = []
+    for joint_id in range(int(model.njnt)):
+        if int(model.jnt_type[joint_id]) not in (hinge, slide):
+            continue
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, joint_id) or ""
+        if name:
+            names.append(name)
+    return names
+
+
+def auto_inject_actuators(model: mujoco.MjModel, xml_path: str | Path) -> mujoco.MjModel:
+    """Add position actuators when a URDF compiled with no motors.
+
+    MuJoCo loads the URDF first. If it has no actuators, this writes MJCF
+    ``<position>`` tags for every hinge and slide joint and compiles that model.
+    """
+    if int(model.nu) > 0:
+        return model
+    names = _motion_joint_names(model)
+    if not names:
+        raise RuntimeError(f"no actuators found in {xml_path}")
+    spec = mujoco.MjSpec.from_file(str(xml_path))
+    xml = spec.to_xml()
+    lines = ["  <actuator>"]
+    for name in names:
+        quoted = xml_escape_attr(name)
+        lines.append(f'    <position name="{quoted}" joint="{quoted}" kp="100"/>')
+    lines.append("  </actuator>")
+    block = "\n".join(lines) + "\n"
+    if "</mujoco>" not in xml:
+        raise RuntimeError(f"Could not inject actuators into {xml_path}")
+    try:
+        injected = mujoco.MjModel.from_xml_string(xml.replace("</mujoco>", block + "</mujoco>"))
+    except Exception as exc:
+        raise RuntimeError(f"Actuator injection failed for {xml_path}: {exc}") from exc
+    if int(injected.nu) <= 0:
+        raise RuntimeError(f"no actuators found in {xml_path}")
+    return injected
+
+
+def xml_escape_attr(value: str) -> str:
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace('"', "&quot;")
+        .replace("<", "&lt;")
+    )
+
+
+def load_robot_model(path: str | Path, *, announce: bool = True) -> mujoco.MjModel:
+    """Load MJCF or URDF. A motor-less URDF gets position actuators."""
+    model_path = str(path)
+    is_urdf = model_path.lower().endswith(".urdf")
+    if is_urdf and announce:
+        print("URDF detected. Loading natively via MuJoCo parser.")
+    try:
+        model = mujoco.MjModel.from_xml_path(model_path)
+    except Exception as exc:
+        kind = "URDF" if is_urdf else "model"
+        raise RuntimeError(f"Could not parse {kind} {model_path}: {exc}") from exc
+    if not is_urdf:
+        return model
+    had_actuators = int(model.nu) > 0
+    model = auto_inject_actuators(model, model_path)
+    if announce and not had_actuators:
+        print(
+            "Warning: URDF loaded. Automatic actuator injection applied. "
+            "For precise testing, please provide a tuned MJCF."
+        )
+    return model
+
+
 def profile_motor_ids(model: mujoco.MjModel) -> list[int]:
     """Actuator indices in the profile joint order."""
     ids: list[int] = []
@@ -1061,7 +1137,89 @@ def add_legacy_gravity_ff(model: mujoco.MjModel, data: mujoco.MjData) -> None:
     data.ctrl[:] += np.asarray(data.qfrc_bias[6 : 6 + model.nu], dtype=float)
 
 
+def root_is_free(model: mujoco.MjModel) -> bool:
+    """True when the first joint is a floating base (Go2, G1)."""
+    return (
+        model.njnt > 0
+        and int(model.jnt_type[0]) == int(mujoco.mjtJoint.mjJNT_FREE)
+    )
+
+
+def actuator_qpos_index(model: mujoco.MjModel) -> np.ndarray:
+    """qpos address for each actuator. Tendon actuators stay at -1."""
+    joint_trn = int(mujoco.mjtTrn.mjTRN_JOINT)
+    index = np.full(int(model.nu), -1, dtype=int)
+    for i in range(int(model.nu)):
+        if int(model.actuator_trntype[i]) != joint_trn:
+            continue
+        jid = int(model.actuator_trnid[i, 0])
+        if jid < 0:
+            continue
+        index[i] = int(model.jnt_qposadr[jid])
+    return index
+
+
+def actuator_qvel_index(model: mujoco.MjModel) -> np.ndarray:
+    """dof address for each joint actuator. Tendon actuators stay at -1."""
+    joint_trn = int(mujoco.mjtTrn.mjTRN_JOINT)
+    index = np.full(int(model.nu), -1, dtype=int)
+    for i in range(int(model.nu)):
+        if int(model.actuator_trntype[i]) != joint_trn:
+            continue
+        jid = int(model.actuator_trnid[i, 0])
+        if jid < 0:
+            continue
+        index[i] = int(model.jnt_dofadr[jid])
+    return index
+
+
+def read_actuated_qpos(model: mujoco.MjModel, data: mujoco.MjData) -> np.ndarray:
+    q = np.zeros(int(model.nu), dtype=float)
+    for i, adr in enumerate(actuator_qpos_index(model)):
+        if int(adr) >= 0:
+            q[i] = float(data.qpos[int(adr)])
+    return q
+
+
+def read_actuated_qvel(model: mujoco.MjModel, data: mujoco.MjData) -> np.ndarray:
+    v = np.zeros(int(model.nu), dtype=float)
+    for i, adr in enumerate(actuator_qvel_index(model)):
+        if int(adr) >= 0:
+            v[i] = float(data.qvel[int(adr)])
+    return v
+
+
+def body_height(model: mujoco.MjModel, data: mujoco.MjData) -> float:
+    """Base height for a floating robot, hand height for a fixed arm."""
+    if root_is_free(model):
+        return float(data.qpos[2])
+    hand_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "hand")
+    body_id = int(hand_id) if hand_id >= 0 else int(model.nbody - 1)
+    return float(data.xpos[body_id, 2])
+
+
+def body_roll_pitch_tilt(model: mujoco.MjModel, data: mujoco.MjData) -> tuple[float, float, float]:
+    """Free-joint tilt. A fixed base has no fall orientation."""
+    if root_is_free(model):
+        roll, pitch = freejoint_roll_pitch(data.qpos)
+        return roll, pitch, tilt_from_vertical(data.qpos)
+    return 0.0, 0.0, 0.0
+
+
+def body_planar_xy(model: mujoco.MjModel, data: mujoco.MjData) -> np.ndarray:
+    if root_is_free(model):
+        return np.array(data.qpos[:2], dtype=float)
+    return np.array(data.xpos[1, :2], dtype=float)
+
+
+def body_speed(model: mujoco.MjModel, data: mujoco.MjData) -> float:
+    if root_is_free(model):
+        return float(np.linalg.norm(data.qvel[:3]))
+    return float(np.linalg.norm(data.cvel[1, 3:6]))
+
+
 def joint_observation(
+    model: mujoco.MjModel,
     data: mujoco.MjData,
     rng: np.random.Generator | None,
     noise_q: float,
@@ -1069,8 +1227,8 @@ def joint_observation(
     bias_q: float,
 ) -> dict:
     """Joint observation. Noise and bias are the same for every controller."""
-    q_obs = np.asarray(data.qpos[7:], dtype=float)
-    v_obs = np.asarray(data.qvel[6:], dtype=float)
+    q_obs = read_actuated_qpos(model, data)
+    v_obs = read_actuated_qvel(model, data)
     if rng is not None and (noise_q > 0.0 or noise_v > 0.0):
         if noise_q > 0.0:
             q_obs = q_obs + rng.normal(0.0, noise_q, size=q_obs.shape)
@@ -1095,7 +1253,7 @@ def command_from_controller(
     gravity_ff: bool = False,
     ff_ctrl: np.ndarray | None = None,
 ) -> np.ndarray:
-    obs = joint_observation(data, rng, noise_q, noise_v, bias_q)
+    obs = joint_observation(model, data, rng, noise_q, noise_v, bias_q)
     label = getattr(controller, "name", None) or type(controller).__name__
     raw_cmd = controller.act(obs, step, dt, target_qpos)
     try:
@@ -1476,17 +1634,18 @@ def simulate_episode(
         mujoco.mj_setConst(model, data)
         reset_to_stance(model, data)
         if jitter:
-            data.qpos[7 : 7 + n_joints] = (
-                np.asarray(data.qpos[7 : 7 + n_joints], dtype=float)
-                + np.asarray(pert["joint_jitter"], dtype=float)
-            )
+            jitter_vec = np.asarray(pert["joint_jitter"], dtype=float)
+            for i, adr in enumerate(actuator_qpos_index(model)):
+                if int(adr) < 0 or i >= jitter_vec.size:
+                    continue
+                data.qpos[int(adr)] = float(data.qpos[int(adr)]) + float(jitter_vec[i])
             clip_hinge_qpos(model, data)
         set_sliding_friction(model, friction_geoms, friction)
         mujoco.mj_forward(model, data)
-        z_start = float(data.qpos[2])
+        z_start = body_height(model, data)
         key_ctrl = np.array(data.ctrl, copy=True)
         feet = list(foot_ids) if foot_ids else find_foot_geom_ids(model)
-        body_xy0 = np.array(data.qpos[:2], dtype=float)
+        body_xy0 = body_planar_xy(model, data)
         foot_rel0 = {
             gid: np.array(data.geom_xpos[gid][:2], dtype=float) - body_xy0
             for gid in feet
@@ -1609,16 +1768,15 @@ def simulate_episode(
             tau = np.abs(np.asarray(data.qfrc_actuator[act_dofs], dtype=float))
             tau_lim = np.maximum(np.abs(act_gears) * limit_abs, 1e-9)
             max_tau_over_limit = max(max_tau_over_limit, float(np.max(tau / tau_lim)))
-            z = float(data.qpos[2])
-            roll, pitch = freejoint_roll_pitch(data.qpos)
-            tilt = tilt_from_vertical(data.qpos)
-            speed = float(np.linalg.norm(data.qvel[:3]))
+            z = body_height(model, data)
+            roll, pitch, tilt = body_roll_pitch_tilt(model, data)
+            speed = body_speed(model, data)
             min_z = min(min_z, z)
             max_abs_roll = max(max_abs_roll, abs(roll))
             max_abs_pitch = max(max_abs_pitch, abs(pitch))
             max_tilt = max(max_tilt, tilt)
             max_body_speed = max(max_body_speed, speed)
-            body_xy = np.array(data.qpos[:2], dtype=float)
+            body_xy = body_planar_xy(model, data)
             slip_now = 0.0
             rels = []
             for gid in feet:
@@ -2590,7 +2748,7 @@ def _run_chunk(payload: dict) -> dict:
     controllers.apply_import_root(payload.get("controller_import_root"))
     if payload.get("config_path"):
         apply_robot_profile(RobotProfile(payload["config_path"]))
-    model = mujoco.MjModel.from_xml_path(MODEL_PATH)
+    model = load_robot_model(MODEL_PATH, announce=False)
     data = mujoco.MjData(model)
     floor_id = find_floor_geom_id(model)
     foot_ids = find_foot_geom_ids(model)
@@ -3398,7 +3556,7 @@ def measure_stance_physics(
     )
     reset_to_stance(model, data)
     mujoco.mj_forward(model, data)
-    q_err = np.asarray(data.qpos[7:], dtype=float) - np.asarray(target_qpos, dtype=float)
+    q_err = read_actuated_qpos(model, data) - np.asarray(target_qpos, dtype=float)
     return {
         "z_start": result["z_start"],
         "z_end": result["z_end"],
@@ -3815,9 +3973,9 @@ def hold_stance_for_ff(
     reset_to_stance(model, data)
     set_sliding_friction(model, friction_geoms, 1.0)
     mujoco.mj_forward(model, data)
-    start_z = float(data.qpos[2])
+    start_z = body_height(model, data)
     start_bias = np.array(data.qfrc_bias, copy=True)
-    start_qerr = np.asarray(data.qpos[7:], dtype=float) - np.asarray(target_qpos)
+    start_qerr = read_actuated_qpos(model, data) - np.asarray(target_qpos)
     for _ in range(n_steps):
         apply_pd(model, data, target_qpos, kp=kp, kd=kd, gravity_ff=False)
         if ff_mode == "legacy":
@@ -3844,11 +4002,11 @@ def hold_stance_for_ff(
                 ),
             }
         )
-    qerr = np.asarray(data.qpos[7:], dtype=float) - np.asarray(target_qpos)
+    qerr = read_actuated_qpos(model, data) - np.asarray(target_qpos)
     return {
         "ff_mode": ff_mode,
         "z_start": start_z,
-        "z_end": float(data.qpos[2]),
+        "z_end": body_height(model, data),
         "qerr_abs_mean_start": float(np.mean(np.abs(start_qerr))),
         "qerr_abs_mean": float(np.mean(np.abs(qerr))),
         "bias_abs_mean_start_legs": float(np.mean(np.abs(start_bias[6:]))),
@@ -4915,7 +5073,7 @@ def main() -> None:
     make_controller(ACTIVE_CONTROLLER, main_kp, main_kd)
 
     try:
-        model = mujoco.MjModel.from_xml_path(MODEL_PATH)
+        model = load_robot_model(MODEL_PATH)
         motor_ids = profile_motor_ids(model)
         if len(motor_ids) != model.nu:
             raise RuntimeError(
@@ -4954,7 +5112,7 @@ def main() -> None:
     )
 
     reset_to_stance(model, data)
-    target_qpos = np.array(data.qpos[7:], copy=True)
+    target_qpos = read_actuated_qpos(model, data)
     if model.nu != len(target_qpos):
         raise RuntimeError(
             f"actuator count ({model.nu}) does not match joint count ({len(target_qpos)})"

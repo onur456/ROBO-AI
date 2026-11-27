@@ -18,10 +18,12 @@ from paired_compare import BETTER, NOISE, WORSE
 from dashboard.app import (
     _verdict_color,
     apply_filters,
+    auto_generate_config,
     comparison_table,
     failure_heatmap,
     load_data,
 )
+from dashboard.workspace import estimated_price, run_stress_backend
 
 
 def _mini_batch() -> dict:
@@ -199,6 +201,51 @@ class DashboardSmokeTest(unittest.TestCase):
         self.assertIn("#3DDC97", html)
         self.assertIn("#FF5C5C", html)
         self.assertIn("#9AA0A6", html)
+
+    def test_auto_generate_config_reads_joint_names(self) -> None:
+        xml = """<mujoco model="arm">
+          <worldbody>
+            <body>
+              <joint name="shoulder"/>
+              <body>
+                <joint name="elbow" type="hinge"/>
+                <freejoint name="ignored"/>
+              </body>
+            </body>
+          </worldbody>
+        </mujoco>"""
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "arm.xml"
+            path.write_text(xml, encoding="utf-8")
+            config = auto_generate_config(path)
+        self.assertEqual(config["joint_names"], ["shoulder", "elbow"])
+        self.assertEqual(config["num_motors"], 2)
+
+    def test_estimated_price_matches_the_two_anchors(self) -> None:
+        self.assertAlmostEqual(estimated_price(100), 5.0)
+        self.assertAlmostEqual(estimated_price(1000), 20.0)
+
+    def test_run_stress_backend_writes_one_episode(self) -> None:
+        report = Path(tempfile.mkdtemp()) / "urdf_batch.json"
+        result = run_stress_backend(
+            ROOT / "models" / "simple_arm.urdf",
+            1,
+            report_path=report,
+            test_friction=False,
+            test_impact=False,
+        )
+        self.assertEqual(result.returncode, 0, (result.stderr or result.stdout)[-800:])
+        payload = json.loads(report.read_text(encoding="utf-8"))
+        self.assertEqual(len(payload["episodes"]), 1)
+
+    def test_bad_model_is_reported_before_the_batch(self) -> None:
+        from dashboard.workspace import write_uploaded_profile
+
+        with tempfile.TemporaryDirectory() as folder:
+            broken = Path(folder) / "broken.xml"
+            broken.write_text("<not-mujoco>", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                write_uploaded_profile(broken, Path(folder) / "profile.json")
 
 
 if __name__ == "__main__":

@@ -6,6 +6,9 @@ env/
 # Reports
 reports/
 
+# Uploaded models and controllers
+temp/
+
 # Byte-compiled / cache
 __pycache__/
 *.py[cod]
